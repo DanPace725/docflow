@@ -1,6 +1,7 @@
-
 // This is a mock service that would be replaced with actual Azure Form Recognizer integration
 // In a real application, these functions would make API calls to Azure services
+
+import { AzureKeyCredential, DocumentAnalysisClient } from "@azure/ai-form-recognizer";
 
 // Define types for the extracted data
 export interface InvoiceData {
@@ -44,75 +45,63 @@ export interface ProcessingResult {
   error?: string;
 }
 
-// Mock function to analyze documents with Azure Form Recognizer
+// Function to analyze documents with Azure Form Recognizer
 export const analyzeDocument = async (
   file: File,
   documentType: string,
 ): Promise<ProcessingResult> => {
-  return new Promise((resolve) => {
-    // Simulate processing delay
-    setTimeout(() => {
-      // Mock successful processing
-      if (documentType === 'invoice') {
-        const mockInvoiceData: InvoiceData = {
-          invoiceNumber: 'INV-' + Math.floor(Math.random() * 10000),
-          invoiceDate: new Date().toISOString().slice(0, 10),
-          dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-          vendor: 'Example Vendor Inc.',
-          total: Math.round(Math.random() * 10000) / 100,
-          subtotal: Math.round(Math.random() * 9000) / 100,
-          tax: Math.round(Math.random() * 1000) / 100,
-          items: [
-            {
-              description: 'Product A',
-              quantity: Math.floor(Math.random() * 10) + 1,
-              unitPrice: Math.round(Math.random() * 100) / 100,
-              amount: Math.round(Math.random() * 500) / 100,
-              productCode: 'P12-345-678',
-            },
-            {
-              description: 'Service B',
-              quantity: Math.floor(Math.random() * 5) + 1,
-              unitPrice: Math.round(Math.random() * 200) / 100,
-              amount: Math.round(Math.random() * 800) / 100,
-              productCode: 'P22-456-789',
-            },
-          ],
-        };
-        resolve({
-          success: true,
-          data: mockInvoiceData,
+  try {
+    const endpoint = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_ENDPOINT;
+    const key = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_KEY;
+    const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
+    const fileBuffer = await file.arrayBuffer();
+    const modelId = documentType === 'invoice' ? 'prebuilt-invoice' : 'prebuilt-document';
+    const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
+    const result = await poller.pollUntilDone();
+    if (documentType === 'invoice' && result.documents?.length) {
+      const fields = result.documents[0].fields;
+      const invoiceData: InvoiceData = {
+        invoiceNumber: fields.InvoiceId?.value || '',
+        invoiceDate: fields.InvoiceDate?.value || '',
+        dueDate: fields.DueDate?.value || '',
+        vendor: fields.VendorName?.value || '',
+        subtotal: fields.Subtotal?.value || 0,
+        tax: fields.Tax?.value || 0,
+        total: fields.InvoiceTotal?.value || 0,
+        items: fields.Items?.value.map(item => ({
+          description: item.value.Description?.value || '',
+          quantity: item.value.Quantity?.value || 0,
+          unitPrice: item.value.UnitPrice?.value || 0,
+          amount: item.value.Amount?.value || 0,
+          productCode: item.value.ProductCode?.value || '',
+        })) || [],
+      };
+      return { success: true, data: invoiceData };
+    } else if (result.tables?.length) {
+      const rawItems = result.tables.flatMap(table => {
+        const rows: string[][] = [];
+        let currentRow = -1;
+        table.cells.sort((a, b) => a.rowIndex - b.rowIndex || a.columnIndex - b.columnIndex)
+          .forEach(cell => {
+            if (cell.rowIndex !== currentRow) { rows.push([]); currentRow = cell.rowIndex; }
+            rows[rows.length - 1].push(cell.content);
+          });
+        const headers = rows[0].map(h => h.toLowerCase());
+        return rows.slice(1).map(vals => {
+          const item: POItem = {} as POItem;
+          headers.forEach((h, i) => {
+            const val = vals[i];
+            (item as any)[h] = isNaN(Number(val)) ? val : Number(val);
+          });
+          return item;
         });
-      } else {
-        const mockPOData: PurchaseOrderData = {
-          poNumber: 'PO-' + Math.floor(Math.random() * 10000),
-          poDate: new Date().toISOString().slice(0, 10),
-          vendor: 'Example Supplier Co.',
-          total: Math.round(Math.random() * 10000) / 100,
-          items: [
-            {
-              description: 'Component X',
-              quantity: Math.floor(Math.random() * 100) + 1,
-              unitPrice: Math.round(Math.random() * 50) / 100,
-              amount: Math.round(Math.random() * 2000) / 100,
-              productCode: 'P34-567-890',
-            },
-            {
-              description: 'Component Y',
-              quantity: Math.floor(Math.random() * 50) + 1,
-              unitPrice: Math.round(Math.random() * 75) / 100,
-              amount: Math.round(Math.random() * 3000) / 100,
-              productCode: 'P45-678-901',
-            },
-          ],
-        };
-        resolve({
-          success: true,
-          data: mockPOData,
-        });
-      }
-    }, 2000);
-  });
+      });
+      return { success: true, data: { items: rawItems } };
+    }
+    return { success: false, error: 'No data extracted' };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
 };
 
 // Mock function to split multi-page PDFs
