@@ -17,8 +17,8 @@ const ActionButtons: React.FC<ActionButtonsProps> = ({
   onImport,
   onProcess,
   onViewOutput,
-  onPullPrices,
-  onBatchClean,
+  //onPullPrices,
+  //onBatchClean,
   isProcessing,
   hasFiles,
 }) => {
@@ -59,7 +59,7 @@ const ActionButtons: React.FC<ActionButtonsProps> = ({
         
         <Button 
           variant="outline" 
-          onClick={onPullPrices}
+          //onClick={onPullPrices}
           disabled={isProcessing}
         >
           Pull Prices
@@ -67,7 +67,7 @@ const ActionButtons: React.FC<ActionButtonsProps> = ({
         
         <Button 
           variant="outline" 
-          onClick={onBatchClean}
+          //onClick={onBatchClean}
           disabled={isProcessing}
         >
           Batch Clean

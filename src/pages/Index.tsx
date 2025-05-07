@@ -8,20 +8,23 @@ import SettingsPanel from '@/components/settings-panel';
 import ProcessStatus from '@/components/process-status';
 import ActionButtons from '@/components/action-buttons';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+
 
 import { 
   analyzeDocument,
   splitPdf,
   generateExcelOutput,
-  pullPrices as pullPricesService,
-  batchClean as batchCleanService
+  //pullPrices as pullPricesService,
+  //batchClean as batchCleanService
 } from '@/services/document-processor';
 
 const Index: React.FC = () => {
   // State for files and settings
   const [files, setFiles] = useState<File[]>([]);
-  const [documentType, setDocumentType] = useState<string>('invoice');
+  const [documentType, setDocumentType] = useState<string>('purchase-order');
   const [multiPage, setMultiPage] = useState<boolean>(false);
+  const [downloadUrls, setDownloadUrls] = useState<Array<{ url: string; fileName: string }>>([]);
   
   // Processing state
   const [status, setStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle');
@@ -57,15 +60,23 @@ const Index: React.FC = () => {
           
           // Analyze the document
           const result = await analyzeDocument(page, documentType);
-          
+          const { url, fileName: excelFileName } = await generateExcelOutput(result.data!, documentType, page.name);
+          setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
           if (!result.success) {
-            throw new Error(`Failed to analyze ${file.name}: ${result.error}`);
+            throw new Error(`Failed to analyze ${page.name}: ${result.error}`);
           }
           
           // Generate Excel output
-          await generateExcelOutput(result.data!, documentType);
+          await generateExcelOutput(result.data!, documentType, page.name);  // Remove this line as it's duplicate
+
+          // Add this after setDownloadUrls:
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = excelFileName;
+          link.click();
         }
       }
+      
       
       setProgress(100);
       setStatus('success');
@@ -99,45 +110,45 @@ const Index: React.FC = () => {
   };
 
   const handlePullPrices = async () => {
-    setStatus('processing');
-    setStatusMessage('Pulling prices from database...');
-    setProgress(50);
-    
-    try {
-      await pullPricesService();
-      setStatus('success');
-      setStatusMessage('Price data successfully updated');
-      toast.success("Prices Updated", {
-        description: "Successfully pulled and updated price data",
-      });
-    } catch (error) {
-      setStatus('error');
-      setStatusMessage(`Error pulling prices: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      toast.error("Error", {
-        description: "Failed to pull price data",
-      });
-    }
-  };
+  //   setStatus('processing');
+  //   setStatusMessage('Pulling prices from database...');
+  //   setProgress(50);
+  //   
+  //   try {
+  //     await pullPricesService();
+  //     setStatus('success');
+  //     setStatusMessage('Price data successfully updated');
+  //     toast.success("Prices Updated", {
+  //       description: "Successfully pulled and updated price data",
+  //     });
+  //   } catch (error) {
+  //     setStatus('error');
+  //     setStatusMessage(`Error pulling prices: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  //     toast.error("Error", {
+  //       description: "Failed to pull price data",
+  //     });
+  //   }
+   };
 
   const handleBatchClean = async () => {
-    setStatus('processing');
-    setStatusMessage('Running batch clean process...');
-    setProgress(50);
-    
-    try {
-      await batchCleanService();
-      setStatus('success');
-      setStatusMessage('Batch clean completed successfully');
-      toast.success("Batch Clean", {
-        description: "Successfully completed batch clean process",
-      });
-    } catch (error) {
-      setStatus('error');
-      setStatusMessage(`Error during batch clean: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      toast.error("Error", {
-        description: "Failed to complete batch clean process",
-      });
-    }
+  //   setStatus('processing');
+  //   setStatusMessage('Running batch clean process...');
+  //   setProgress(50);
+  //   
+  //   try {
+  //     await batchCleanService();
+  //     setStatus('success');
+  //     setStatusMessage('Batch clean completed successfully');
+  //     toast.success("Batch Clean", {
+  //       description: "Successfully completed batch clean process",
+  //     });
+  //   } catch (error) {
+  //     setStatus('error');
+  //     setStatusMessage(`Error during batch clean: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  //     toast.error("Error", {
+  //       description: "Failed to complete batch clean process",
+  //     });
+  //   }
   };
 
   return (
@@ -182,6 +193,35 @@ const Index: React.FC = () => {
               multiPage={multiPage}
               setMultiPage={setMultiPage}
             />
+            {/* Add the download history card here */}
+            {downloadUrls.length > 0 && (
+          <Card>
+            <CardContent className="p-6">
+              <h2 className="text-lg font-semibold text-gray-800 mb-4">Generated Files</h2>
+              <div className="space-y-2">
+                {downloadUrls.map((file, index) => (
+                  <div key={index} className="flex items-center justify-between">
+                    <span className="text-sm text-gray-600">
+                      {file.fileName}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = file.url;
+                        link.download = file.fileName;
+                        link.click();
+                      }}
+                    >
+                      Download Excel
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
             
             <Card>
               <CardContent className="p-6">

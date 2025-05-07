@@ -29,8 +29,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
               <SelectValue placeholder="Select document type" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="invoice">Invoice</SelectItem>
               <SelectItem value="purchase-order">Purchase Order</SelectItem>
+              <SelectItem value="invoice">Invoice</SelectItem>
+
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground mt-1">
