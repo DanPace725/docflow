@@ -41,6 +41,8 @@ const Index: React.FC = () => {
     setStatus('processing');
     setStatusMessage('Preparing files for processing...');
     setProgress(10);
+    let pagesWithErrors = 0;
+    let overallErrorMessage = "";
 
     try {
       // Process each file
@@ -60,34 +62,48 @@ const Index: React.FC = () => {
           
           // Analyze the document
           const result = await analyzeDocument(page, documentType);
-          const { url, fileName: excelFileName } = await generateExcelOutput(result.data!, documentType, page.name);
-          setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-          if (!result.success) {
-            throw new Error(`Failed to analyze ${page.name}: ${result.error}`);
-          }
           
-          // Generate Excel output
-          await generateExcelOutput(result.data!, documentType, page.name);  // Remove this line as it's duplicate
-
-          // Add this after setDownloadUrls:
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = excelFileName;
-          link.click();
+          if (result.success && result.data) {
+            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
+            setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+            
+            // Create and click link for download
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = excelFileName;
+            link.click();
+          } else {
+            pagesWithErrors++;
+            const errorMessage = `Failed to process page: ${page.name}. Error: ${result.error || 'No data found'}`;
+            toast.error(errorMessage);
+            overallErrorMessage += `${errorMessage}\n`;
+            // Continue to the next page/file without throwing an error that stops the batch
+          }
         }
       }
       
-      
       setProgress(100);
-      setStatus('success');
-      setStatusMessage(`Successfully processed ${files.length} file(s)`);
-      toast.success("Processing complete", {
-        description: `Successfully processed ${files.length} files`,
-      });
+      if (pagesWithErrors > 0) {
+        setStatus('error');
+        const finalMessage = `Processed ${files.length} file(s) with ${pagesWithErrors} page(s) having errors.`;
+        setStatusMessage(finalMessage);
+        toast.error("Processing completed with errors", {
+          description: `${finalMessage}\nDetails:\n${overallErrorMessage}`,
+        });
+      } else {
+        setStatus('success');
+        setStatusMessage(`Successfully processed ${files.length} file(s)`);
+        toast.success("Processing complete", {
+          description: `Successfully processed ${files.length} files`,
+        });
+      }
       
     } catch (error) {
+      // This catch block will now primarily handle unexpected errors, 
+      // rather than errors from analyzeDocument which are handled above.
       setStatus('error');
-      setStatusMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const unexpectedErrorMessage = `Unexpected error during processing: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      setStatusMessage(unexpectedErrorMessage);
       toast.error("Processing error", {
         description: error instanceof Error ? error.message : 'An unexpected error occurred',
       });
