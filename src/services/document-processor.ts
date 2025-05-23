@@ -113,11 +113,34 @@ export const analyzeDocument = async (
     
     const fileBuffer = await file.arrayBuffer();
     const modelId = 'prebuilt-document';
-    
-    const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
-    const result = await poller.pollUntilDone();
 
-    if (result.tables?.length) {
+    // Retry mechanism configuration
+    const maxRetries = 3;
+    const initialDelay = 1000; // in milliseconds
+
+    let poller;
+    let result;
+    let lastError: any;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
+        result = await poller.pollUntilDone();
+        break; // Success, exit loop
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          const delay = initialDelay * Math.pow(2, attempt);
+          console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay}ms...`, error);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error(`All ${maxRetries + 1} attempts failed.`, error);
+          throw lastError; // Re-throw the last error after all retries
+        }
+      }
+    }
+
+    if (result && result.tables?.length) {
       // Process each table like in Python
       const processedTables = result.tables.map(table => {
         // Extract raw table data
