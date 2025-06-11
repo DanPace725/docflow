@@ -322,45 +322,68 @@ describe('generateExcelOutput', () => {
     vi.restoreAllMocks(); // This should handle spies created with vi.spyOn in this block's beforeEach
   });
 
-  it('should sanitize string properties that are empty or whitespace to null', async () => {
+  // Test case to be modified:
+  it('should sanitize string properties to null AND preserve numbers (incl 0), nulls, and undefined', async () => {
     const purchaseOrderData: PurchaseOrderData = {
       items: [
-        { description: '', pr_codenum: 'P123', pu_quant: 10 }, // Empty string
-        { description: '   ', pr_codenum: 'P456', pu_price: 5.0 }, // Whitespace string
-        { description: 'Valid Item', pr_codenum: '  ', total: 100 }, // Valid and whitespace
-        { description: null, pr_codenum: undefined, pu_quant: 0 }, // Null and undefined, numeric 0
-        { pr_codenum: 'P789' } // Item with some properties missing
+        // Scenario 1: Empty string description, valid numeric quantity
+        { description: '', pr_codenum: 'P123', pu_quant: 10, pu_price: 0.0 },
+        // Scenario 2: Whitespace string description, zero quantity (important test)
+        { description: '   ', pr_codenum: 'P456', pu_quant: 0, total: 0 },
+        // Scenario 3: Valid description, whitespace pr_codenum, non-zero total
+        { description: 'Valid Item', pr_codenum: '  ', total: 100 },
+        // Scenario 4: Null description, undefined pr_codenum, numeric zero quantity
+        { description: null, pr_codenum: undefined, pu_quant: 0 },
+        // Scenario 5: Item with some properties missing, valid pr_codenum
+        { pr_codenum: 'P789', pu_price: 12.34 },
+        // Scenario 6: All numeric fields are zero
+        { description: 'All Zeros Item', pu_quant: 0, pu_price: 0, total: 0 }
       ],
     };
+
+    // Mock XLSX methods used within generateExcelOutput
+    // mockJsonToSheet is already assigned in beforeEach from the mocked XLSX module
+    // Other XLSX mocks (book_new, book_append_sheet, write) should be active from the suite's setup
 
     await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test.pdf');
 
     expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
     const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
 
-    // Check item 1: description: '' -> null
+    // --- Assertions ---
+
+    // Item 1: description: '' -> null, pu_quant: 10, pu_price: 0.0 (preserved)
     expect(sanitizedDataPassedToSheet[0].description).toBeNull();
     expect(sanitizedDataPassedToSheet[0].pr_codenum).toBe('P123');
     expect(sanitizedDataPassedToSheet[0].pu_quant).toBe(10);
+    expect(sanitizedDataPassedToSheet[0].pu_price).toBe(0.0); // Crucial: 0.0 preserved
 
-    // Check item 2: description: '   ' -> null
+    // Item 2: description: '   ' -> null, pu_quant: 0 (preserved), total: 0 (preserved)
     expect(sanitizedDataPassedToSheet[1].description).toBeNull();
     expect(sanitizedDataPassedToSheet[1].pr_codenum).toBe('P456');
-    expect(sanitizedDataPassedToSheet[1].pu_price).toBe(5.0);
+    expect(sanitizedDataPassedToSheet[1].pu_quant).toBe(0); // Crucial: 0 preserved
+    expect(sanitizedDataPassedToSheet[1].total).toBe(0);   // Crucial: 0 preserved
 
-    // Check item 3: pr_codenum: '  ' -> null
+    // Item 3: pr_codenum: '  ' -> null, description: 'Valid Item' (preserved)
     expect(sanitizedDataPassedToSheet[2].description).toBe('Valid Item');
     expect(sanitizedDataPassedToSheet[2].pr_codenum).toBeNull();
     expect(sanitizedDataPassedToSheet[2].total).toBe(100);
 
-    // Check item 4: null, undefined, and 0 are preserved
+    // Item 4: description: null (preserved), pr_codenum: undefined (preserved), pu_quant: 0 (preserved)
     expect(sanitizedDataPassedToSheet[3].description).toBeNull();
     expect(sanitizedDataPassedToSheet[3].pr_codenum).toBeUndefined();
-    expect(sanitizedDataPassedToSheet[3].pu_quant).toBe(0);
+    expect(sanitizedDataPassedToSheet[3].pu_quant).toBe(0); // Crucial: 0 preserved
 
-    // Check item 5: missing properties remain missing (undefined)
+    // Item 5: Missing properties remain undefined, existing ones preserved
     expect(sanitizedDataPassedToSheet[4].description).toBeUndefined();
     expect(sanitizedDataPassedToSheet[4].pr_codenum).toBe('P789');
+    expect(sanitizedDataPassedToSheet[4].pu_price).toBe(12.34);
+
+    // Item 6: All numeric zeros preserved
+    expect(sanitizedDataPassedToSheet[5].description).toBe('All Zeros Item');
+    expect(sanitizedDataPassedToSheet[5].pu_quant).toBe(0);
+    expect(sanitizedDataPassedToSheet[5].pu_price).toBe(0);
+    expect(sanitizedDataPassedToSheet[5].total).toBe(0);
   });
 
   it('should preserve items with no string properties needing sanitization', async () => {
