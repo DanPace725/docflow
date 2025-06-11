@@ -1,6 +1,16 @@
-import { analyzeDocument, ProcessingResult } from './document-processor';
+import { analyzeDocument, ProcessingResult, PurchaseOrderData, POItem } from './document-processor';
 import { DocumentAnalysisClient, PollerLike, AnalyzeResult, AnalyzedDocument } from '@azure/ai-form-recognizer';
 import { vi, describe, it, expect, beforeEach, afterEach, SpyInstance } from 'vitest';
+import * as XLSX from 'xlsx'; // Import for type usage if needed by mock, and for accessing mocked members
+
+vi.mock('xlsx', () => ({
+  utils: {
+    json_to_sheet: vi.fn(data => ({ '!ref': 'A1:B2', ...data })), // Return a mock sheet object
+    book_new: vi.fn(() => ({ SheetNames: [], Sheets: {} })),
+    book_append_sheet: vi.fn(),
+  },
+  write: vi.fn(() => new ArrayBuffer(8)), // Must return non-empty for Blob
+}));
 
 vi.mock('@azure/ai-form-recognizer', async (importOriginal) => {
   const actual = await importOriginal() as any;
@@ -10,6 +20,15 @@ vi.mock('@azure/ai-form-recognizer', async (importOriginal) => {
     AzureKeyCredential: vi.fn(),
   };
 });
+
+// Mock URL.createObjectURL if not already globally defined or if needing to ensure it's a mock for all tests
+if (typeof globalThis.URL?.createObjectURL === 'undefined') {
+  if (!globalThis.URL) {
+    (globalThis as any).URL = {};
+  }
+  globalThis.URL.createObjectURL = vi.fn(() => 'mock-url');
+}
+
 
 describe('analyzeDocument', () => {
   let mockBeginAnalyzeDocument: SpyInstance;
@@ -263,4 +282,107 @@ describe('analyzeDocument', () => {
         expect(true).toBe(true); // Placeholder for acknowledgment.
       });
 
+});
+
+describe('generateExcelOutput', () => {
+  let mockJsonToSheet: SpyInstance;
+
+  beforeEach(() => {
+    // Reset mocks before each test
+    vi.clearAllMocks(); // Clears call counts etc. for all mocks
+
+    // Re-assign spy if it's from a vi.mock.
+    // XLSX is mocked as a whole, so its members are already mocks.
+    mockJsonToSheet = XLSX.utils.json_to_sheet;
+
+    // Ensure URL.createObjectURL is a mock for this test suite's context
+    // It might have been globally mocked, or we might need to spy/re-mock here
+    if (!vi.isMockFunction(globalThis.URL.createObjectURL)) {
+        vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => 'mock-url');
+    } else {
+        // If already a global mock, ensure it's reset if necessary or re-assert behavior
+        (globalThis.URL.createObjectURL as SpyInstance).mockClear();
+        (globalThis.URL.createObjectURL as SpyInstance).mockReturnValue('mock-url');
+    }
+  });
+
+  afterEach(() => {
+    // vi.restoreAllMocks(); // This is good, but if URL.createObjectURL was spied here, it handles it.
+                           // If it was globally mocked, this won't touch it unless we spied on the global mock.
+                           // Let's rely on vi.clearAllMocks() for general mock state and specific spies for restore.
+    // If we spied on globalThis.URL.createObjectURL in beforeEach, restore it.
+    if (vi.isMockFunction(globalThis.URL.createObjectURL) && (globalThis.URL.createObjectURL as any).mockRestore) {
+      (globalThis.URL.createObjectURL as any).mockRestore();
+    }
+    // If we used vi.clearAllMocks(), specific mock function states are cleared.
+    // vi.restoreAllMocks() is generally more thorough for spies.
+    // For robust cleanup with potential global mocks, it's tricky.
+    // Given the setup, vi.clearAllMocks in beforeEach is the primary reset.
+    // Let's ensure afterEach properly cleans up spies made within this describe block.
+    vi.restoreAllMocks(); // This should handle spies created with vi.spyOn in this block's beforeEach
+  });
+
+  it('should sanitize string properties that are empty or whitespace to null', async () => {
+    const purchaseOrderData: PurchaseOrderData = {
+      items: [
+        { description: '', pr_codenum: 'P123', pu_quant: 10 }, // Empty string
+        { description: '   ', pr_codenum: 'P456', pu_price: 5.0 }, // Whitespace string
+        { description: 'Valid Item', pr_codenum: '  ', total: 100 }, // Valid and whitespace
+        { description: null, pr_codenum: undefined, pu_quant: 0 }, // Null and undefined, numeric 0
+        { pr_codenum: 'P789' } // Item with some properties missing
+      ],
+    };
+
+    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test.pdf');
+
+    expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
+    const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
+
+    // Check item 1: description: '' -> null
+    expect(sanitizedDataPassedToSheet[0].description).toBeNull();
+    expect(sanitizedDataPassedToSheet[0].pr_codenum).toBe('P123');
+    expect(sanitizedDataPassedToSheet[0].pu_quant).toBe(10);
+
+    // Check item 2: description: '   ' -> null
+    expect(sanitizedDataPassedToSheet[1].description).toBeNull();
+    expect(sanitizedDataPassedToSheet[1].pr_codenum).toBe('P456');
+    expect(sanitizedDataPassedToSheet[1].pu_price).toBe(5.0);
+
+    // Check item 3: pr_codenum: '  ' -> null
+    expect(sanitizedDataPassedToSheet[2].description).toBe('Valid Item');
+    expect(sanitizedDataPassedToSheet[2].pr_codenum).toBeNull();
+    expect(sanitizedDataPassedToSheet[2].total).toBe(100);
+
+    // Check item 4: null, undefined, and 0 are preserved
+    expect(sanitizedDataPassedToSheet[3].description).toBeNull();
+    expect(sanitizedDataPassedToSheet[3].pr_codenum).toBeUndefined();
+    expect(sanitizedDataPassedToSheet[3].pu_quant).toBe(0);
+
+    // Check item 5: missing properties remain missing (undefined)
+    expect(sanitizedDataPassedToSheet[4].description).toBeUndefined();
+    expect(sanitizedDataPassedToSheet[4].pr_codenum).toBe('P789');
+  });
+
+  it('should preserve items with no string properties needing sanitization', async () => {
+    const purchaseOrderData: PurchaseOrderData = {
+      items: [
+        { description: 'Real Item', pr_codenum: 'PXYZ', pu_quant: 1, pu_price: 10, total: 10 },
+        { pu_quant: 0, pu_price: 0, total: 0} // All numeric zeros
+      ],
+    };
+
+    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test2.pdf');
+
+    expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
+    const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
+
+    expect(sanitizedDataPassedToSheet[0].description).toBe('Real Item');
+    expect(sanitizedDataPassedToSheet[0].pr_codenum).toBe('PXYZ');
+    expect(sanitizedDataPassedToSheet[0].pu_quant).toBe(1);
+
+    expect(sanitizedDataPassedToSheet[1].pu_quant).toBe(0);
+    expect(sanitizedDataPassedToSheet[1].pu_price).toBe(0);
+    expect(sanitizedDataPassedToSheet[1].total).toBe(0);
+    expect(sanitizedDataPassedToSheet[1].description).toBeUndefined();
+  });
 });

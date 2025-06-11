@@ -246,11 +246,42 @@ export const generateExcelOutput = async (
   data: PurchaseOrderData,
   documentType: string,
   fileName: string
-): Promise<{ url: string; fileName: string }> => {  // Changed return type here
+): Promise<{ url: string; fileName: string }> => {
+  // Sanitize items data for Excel generation
+  const sanitizedItems = data.items.map(item => {
+    const sanitizedItem: POItem = {}; // Create a new object based on POItem structure
+
+    // Iterate over keys of a POItem, which are known
+    // (description, pu_quant, pu_price, total, pr_codenum)
+    // Or iterate over keys of the item itself if dynamic keys are possible,
+    // but POItem structure is fixed.
+
+    (Object.keys(item) as Array<keyof POItem>).forEach(key => {
+      const value = item[key];
+      if (typeof value === 'string' && value.trim() === '') {
+        // If string is empty or only whitespace, set to null for Excel
+        (sanitizedItem as any)[key] = null;
+      } else {
+        // Otherwise, keep the original value
+        (sanitizedItem as any)[key] = value;
+      }
+    });
+
+    // Ensure all potential POItem keys are present if you want to maintain a consistent shape,
+    // even if they were undefined in the original item.
+    // However, XLSX.utils.json_to_sheet handles missing keys by not creating columns for them
+    // or creating empty cells if headers are explicitly provided.
+    // The current approach of only copying existing keys is fine.
+    // If a key was undefined in original item, it remains undefined in sanitizedItem,
+    // which XLSX handles as an empty cell.
+
+    return sanitizedItem;
+  });
+
   const wb = XLSX.utils.book_new();
-  const itemsWs = XLSX.utils.json_to_sheet(data.items);
+  // Use sanitizedItems for generating the worksheet
+  const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
   
-  // Use the PDF name (without .pdf) for the Excel file
   const excelFileName = fileName.replace('.pdf', '.xlsx');
   
   XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
