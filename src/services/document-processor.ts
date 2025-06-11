@@ -2,6 +2,10 @@ import { AzureKeyCredential, DocumentAnalysisClient } from "@azure/ai-form-recog
 import { PDFDocument } from 'pdf-lib';
 import * as XLSX from 'xlsx';
 
+const MAX_RETRIES = 3;
+const INITIAL_DELAY_MS = 3000;
+const MAX_DELAY_MS = 30000;
+
 export interface PurchaseOrderData {
   poNumber?: string;
   poDate?: string;
@@ -115,8 +119,8 @@ export const analyzeDocument = async (
     const modelId = 'prebuilt-document';
 
     // Retry mechanism configuration
-    const maxRetries = 3;
-    const initialDelay = 1000; // in milliseconds
+    const maxRetries = MAX_RETRIES;
+    const initialDelay = INITIAL_DELAY_MS; // in milliseconds
 
     let poller;
     let result;
@@ -127,14 +131,66 @@ export const analyzeDocument = async (
         poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
         result = await poller.pollUntilDone();
         break; // Success, exit loop
-      } catch (error) {
+      } catch (error: any) { // Ensure 'error' is typed as 'any' or a more specific error type if known
         lastError = error;
         if (attempt < maxRetries) {
-          const delay = initialDelay * Math.pow(2, attempt);
-          console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay}ms...`, error);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          let currentDelay = 0;
+          let isAzureSuggestedDelay = false;
+
+          // Check for Azure Form Recognizer specific error structure for rate limiting
+          // Typical Azure errors have a 'statusCode' property.
+          if (error.statusCode === 429) {
+            // 1. Check for error.retryAfterInMs (Azure SDK specific)
+            if (typeof error.retryAfterInMs === 'number') {
+              currentDelay = error.retryAfterInMs;
+              isAzureSuggestedDelay = true;
+            } else {
+              // 2. Check for Retry-After header (may need to inspect error.response.headers)
+              // This part is complex as direct header access depends on the SDK's error structure.
+              // For now, we'll simulate checking a common way it might be exposed.
+              // This might need adjustment based on actual error objects.
+              const retryAfterHeader = error.response?.headers?.get('retry-after') || error.response?.headers?.['retry-after'];
+              if (retryAfterHeader) {
+                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+                if (!isNaN(retryAfterSeconds)) {
+                  currentDelay = retryAfterSeconds * 1000;
+                  isAzureSuggestedDelay = true;
+                }
+              }
+            }
+
+            // 3. Parse error message if no other delay was found yet
+            if (!isAzureSuggestedDelay && error.message) {
+              const messageMatch = error.message.match(/retry after (\d+) seconds/i);
+              if (messageMatch && messageMatch[1]) {
+                const retryAfterSeconds = parseInt(messageMatch[1], 10);
+                if (!isNaN(retryAfterSeconds)) {
+                  currentDelay = retryAfterSeconds * 1000;
+                  isAzureSuggestedDelay = true;
+                }
+              }
+            }
+          }
+
+          // If no Azure suggested delay, or not a 429 error, use exponential backoff
+          if (!isAzureSuggestedDelay) {
+            currentDelay = initialDelay * Math.pow(2, attempt);
+          }
+
+          currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
+
+          let delaySourceMessage = isAzureSuggestedDelay ? "Azure-suggested delay" : "exponential backoff";
+          console.warn(
+            `Attempt ${attempt + 1} of ${maxRetries + 1} failed for document "${file.name}". ` +
+            `Error: ${error.message}. ` +
+            `Retrying in ${currentDelay}ms (using ${delaySourceMessage}).`
+          );
+          await new Promise(resolve => setTimeout(resolve, currentDelay));
         } else {
-          console.error(`All ${maxRetries + 1} attempts failed.`, error);
+          console.error(
+            `All ${maxRetries + 1} attempts to process document "${file.name}" failed. Last error:`,
+            lastError // lastError should contain the full error object
+          );
           throw lastError; // Re-throw the last error after all retries
         }
       }
