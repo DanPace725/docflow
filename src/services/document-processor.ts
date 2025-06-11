@@ -36,44 +36,68 @@ const extractTableData = (table: any) => {
         rows.push([]);
         currentRow = cell.rowIndex;
       }
-      rows[rows.length - 1].push(cell.content);
+      rows[rows.length - 1].push(String(cell.content ?? ""));
     });
   
   return rows;
 };
 
 // Helper function to replace headers
-const replaceImportHeaders = (df: any[]) => {
-  if (df.length === 0) return df;
-  
-  // Convert headers to lowercase but keep original if no match found
-  let headers = df[0].map((h: string) => h.toLowerCase());
-  
-  // Try to enhance headers where we can recognize them
-  headers = headers.map(h => {
-    if (["order", "items", "quantity", "qty"].includes(h)) return "pu_quant";
-    if (["cost", "unit price", "price", "#"].includes(h)) return "pu_price";
-    if (h === "amount" || h === "total") return "total";
-    return h; // Keep original header if no match
-  });
-  
-  // Check for part number pattern and rename only the first matching column
-  const partNumberPattern = /P\d{2}-\d{3}-\d{3}/;
-  let prCodeNumAssigned = false; // Flag to ensure only one column is named 'pr_codenum'
-  headers = headers.map((h, index) => {
-    if (prCodeNumAssigned) return h; // If 'pr_codenum' is already assigned, keep original header
+// This function now receives all rows as dataRows and assigns headers based on predefined list and content pattern matching.
+const replaceImportHeaders = (dataRows: string[][]): { headers: string[]; rows: string[][] } => {
+  if (!dataRows || dataRows.length === 0 || !dataRows[0] || dataRows[0].length === 0) {
+    return { headers: [], rows: dataRows };
+  }
 
-    const columnData = df.slice(1).map(row => row[index]?.toString() || '');
-    const hasPartNumber = columnData.some(cellContent => partNumberPattern.test(cellContent));
+  const numCols = dataRows[0].length;
 
-    if (hasPartNumber) {
-      prCodeNumAssigned = true;
-      return 'pr_codenum';
+  const predefinedHeaders = [
+    'pr_codenum',      // Standardized Part Number
+    'description',     // Item Description
+    'pu_quant',        // Quantity
+    'pu_price',        // Unit Price
+    'total',           // Line Total
+    'unit_of_measure', // e.g., EA, LF, BAGS
+    'vendor_sku',      // Vendor's own part number/SKU, if present
+    'notes'            // Any other notes or details
+  ];
+
+  // Initial Header Assignment
+  let assignedHeaders: string[] = [];
+  for (let i = 0; i < numCols; i++) {
+    if (i < predefinedHeaders.length) {
+      assignedHeaders.push(predefinedHeaders[i]);
+    } else {
+      assignedHeaders.push(`column_${i + 1}`); // Generic name for extra columns
     }
-    return h; // Keep original header if no part number pattern match
-  });
-  
-  return [headers, ...df.slice(1)];
+  }
+
+  // Identify and Set `pr_codenum` Header (Part Number Column Identification)
+  const partNumberPattern = /P\d{2}-\d{3}-\d{3}/i; // Case-insensitive for 'P'
+  let foundPrCodeNumPatternColumn = -1;
+
+  // First pass: find which column (if any) matches the part number pattern
+  for (let colIndex = 0; colIndex < numCols; colIndex++) {
+    const columnData = dataRows.map(row => String(row[colIndex] ?? ""));
+    if (columnData.some(cellContent => partNumberPattern.test(cellContent))) {
+      foundPrCodeNumPatternColumn = colIndex;
+      break; // Found the first column
+    }
+  }
+
+  // Second pass: assign headers, ensuring 'pr_codenum' is correctly placed.
+  if (foundPrCodeNumPatternColumn !== -1) { // A pattern-matching column was found
+    const finalHeaders = assignedHeaders.map((header, colIndex) => {
+      if (colIndex === foundPrCodeNumPatternColumn) return 'pr_codenum';
+      // If this column was initially 'pr_codenum' but isn't the pattern column, make it generic
+      if (header === 'pr_codenum') return `column_${colIndex + 1}`;
+      return header; // Keep the initially assigned header
+    });
+    assignedHeaders = finalHeaders;
+  }
+  // If no pattern column found, the initial assignment (which might have 'pr_codenum' as first predefined) stands.
+
+  return { headers: assignedHeaders, rows: dataRows }; // dataRows is returned unmodified
 };
 
 // Function to split PDF into pages
@@ -191,35 +215,36 @@ export const analyzeDocument = async (
     }
 
     if (result && result.tables?.length) {
-      // Process each table like in Python
-      const processedTables = result.tables.map(table => {
-        // Extract raw table data
-        const tableData = extractTableData(table);
-        // Process headers and data
-        const processedData = replaceImportHeaders(tableData);
-        
-        // Convert to POItems
-        const headers = processedData[0];
-        const items = processedData.slice(1).map(row => {
+      const allItems: POItem[] = []; // Accumulate items from all tables
+
+      result.tables.forEach(table => {
+        const rawTableData = extractTableData(table);
+        const { headers, rows: dataRows } = replaceImportHeaders(rawTableData); // New call
+
+        if (headers.length === 0) { // Skip if no headers were assigned (e.g. empty table)
+            return;
+        }
+
+        const tableItems = dataRows.map(row => {
           const item: any = {};
-          
           headers.forEach((header, index) => {
-            const value = row[index];
-            // Try to convert to number if possible, otherwise keep as string
-            item[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
+            const value = row[index]; // row is already a string[]
+            // Attempt to convert to number if it's a numeric header, otherwise keep as string
+            // This primitive conversion logic might need refinement based on POItem types
+            if (['pu_quant', 'pu_price', 'total'].includes(header)) {
+                const numValue = parseFloat(value);
+                item[header] = isNaN(numValue) ? value : numValue; // Keep string if NaN
+            } else {
+                item[header] = value;
+            }
           });
-          
-          return item;
+          return item as POItem; // Cast to POItem
         });
-        
-        return items;
+        allItems.push(...tableItems);
       });
       
-      // Combine all tables' items
-      const items = processedTables.flat();
-      
       const poData: PurchaseOrderData = {
-        items,
+        items: allItems, // Use the accumulated items
         poNumber: '',
         poDate: '',
         vendor: '',
@@ -325,15 +350,18 @@ export const generateExcelOutput = async (
   });
   console.log('[Data Quality] Finished data processing (revised rules).');
 
+  const finalItems = processedItems.filter(item => {
+    // A row is considered non-blank if at least one of its property values is not null.
+    // (Our processing functions convert empty strings/whitespace to null for blankness)
+    return Object.values(item).some(value => value !== null);
+  });
+
+  if (processedItems.length !== finalItems.length) {
+    console.log(`[Data Quality] Removed ${processedItems.length - finalItems.length} entirely blank rows before Excel generation.`);
+  }
+
   const wb = XLSX.utils.book_new();
-  // const filteredItems = processedItems.filter(item => item.pr_codenum && item.pr_codenum.trim() !== ""); // Filtering removed
-
-  // const skippedItemCount = processedItems.length - filteredItems.length; // Logging for skipped items removed
-  // if (skippedItemCount > 0) {
-  //   console.warn(`[Data Quality] Skipped ${skippedItemCount} items due to missing or empty 'pr_codenum'.`);
-  // }
-
-  const itemsWs = XLSX.utils.json_to_sheet(processedItems); // Use processedItems directly
+  const itemsWs = XLSX.utils.json_to_sheet(finalItems); // Use finalItems
   
   // Use the PDF name (without .pdf) for the Excel file
   const excelFileName = fileName.replace('.pdf', '.xlsx');
