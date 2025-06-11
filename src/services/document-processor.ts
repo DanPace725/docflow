@@ -57,15 +57,20 @@ const replaceImportHeaders = (df: any[]) => {
     return h; // Keep original header if no match
   });
   
-  // Check for part number pattern
+  // Check for part number pattern and rename only the first matching column
   const partNumberPattern = /P\d{2}-\d{3}-\d{3}/;
-  headers.forEach((h, index) => {
-    const hasPartNumber = df.slice(1).some(row => 
-      partNumberPattern.test(row[index]?.toString() || '')
-    );
+  let prCodeNumAssigned = false; // Flag to ensure only one column is named 'pr_codenum'
+  headers = headers.map((h, index) => {
+    if (prCodeNumAssigned) return h; // If 'pr_codenum' is already assigned, keep original header
+
+    const columnData = df.slice(1).map(row => row[index]?.toString() || '');
+    const hasPartNumber = columnData.some(cellContent => partNumberPattern.test(cellContent));
+
     if (hasPartNumber) {
-      headers[index] = 'pr_codenum';
+      prCodeNumAssigned = true;
+      return 'pr_codenum';
     }
+    return h; // Keep original header if no part number pattern match
   });
   
   return [headers, ...df.slice(1)];
@@ -191,8 +196,93 @@ export const generateExcelOutput = async (
   documentType: string,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {  // Changed return type here
+  console.log('[Data Quality] Starting data processing for Excel generation...');
+  const processedItems = data.items.map((item, index) => {
+    const newItem: POItem = {};
+    let warnings = [];
+
+    // pr_codenum
+    if (item.pr_codenum === null || item.pr_codenum === undefined || String(item.pr_codenum).trim() === "") {
+      newItem.pr_codenum = null;
+      // This case is handled by the filter later, but good to note if it was initially problematic
+      if (item.pr_codenum !== null && item.pr_codenum !== undefined) { // Log if it was not already null/undefined
+          warnings.push(`Original 'pr_codenum' was present but empty/whitespace, now null.`);
+      }
+    } else if (typeof item.pr_codenum === 'string') {
+      const trimmedPrCodeNum = item.pr_codenum.trim();
+      if (item.pr_codenum !== trimmedPrCodeNum) {
+        warnings.push(`Trimmed 'pr_codenum' from "${item.pr_codenum}" to "${trimmedPrCodeNum}".`);
+      }
+      newItem.pr_codenum = trimmedPrCodeNum;
+    } else {
+      warnings.push(`Original 'pr_codenum' ("${item.pr_codenum}") was not a string, set to null.`);
+      newItem.pr_codenum = null;
+    }
+
+    // description
+    if (item.description === null || item.description === undefined || String(item.description).trim() === "") {
+      newItem.description = null;
+      if (item.description !== null && item.description !== undefined) {
+           warnings.push(`Original 'description' was present but empty/whitespace, now null.`);
+      }
+    } else if (typeof item.description === 'string') {
+      const trimmedDescription = item.description.trim();
+      if (item.description !== trimmedDescription) {
+        warnings.push(`Trimmed 'description' from "${item.description}" to "${trimmedDescription}".`);
+      }
+      newItem.description = trimmedDescription;
+    } else {
+      warnings.push(`Original 'description' ("${item.description}") was not a string, set to null.`);
+      newItem.description = null;
+    }
+
+    const parseNumeric = (val: any, fieldName: string): number | null => {
+      if (typeof val === 'number') return val;
+      if (val === null || val === undefined || String(val).trim() === "") return null;
+      const num = parseFloat(String(val));
+      if (isNaN(num)) {
+        warnings.push(`Could not parse '${fieldName}' value ("${val}") to a number, set to null.`);
+        return null;
+      }
+      if (String(val) !== String(num)) { // e.g. "010" vs 10, or "12.3.4" vs 12.3
+           warnings.push(`Numeric conversion for '${fieldName}': original "${val}", parsed to "${num}".`);
+      }
+      return num;
+    };
+
+    newItem.pu_quant = parseNumeric(item.pu_quant, 'pu_quant');
+    newItem.pu_price = parseNumeric(item.pu_price, 'pu_price');
+    newItem.total = parseNumeric(item.total, 'total');
+
+    // Retain other properties
+    for (const key in item) {
+      if (!(key in newItem) && item.hasOwnProperty(key)) {
+        (newItem as any)[key] = (item as any)[key];
+      }
+    }
+
+    if (warnings.length > 0) {
+      console.warn(`[Data Quality] Item at index ${index} (original data):`, item, 'Warnings:', warnings.join('; '));
+    }
+    return newItem;
+  });
+  console.log('[Data Quality] Finished data processing.');
+
   const wb = XLSX.utils.book_new();
-  const itemsWs = XLSX.utils.json_to_sheet(data.items);
+  const filteredItems = processedItems.filter(item => item.pr_codenum && item.pr_codenum.trim() !== "");
+
+  const skippedItemCount = processedItems.length - filteredItems.length;
+  if (skippedItemCount > 0) {
+    console.warn(`[Data Quality] Skipped ${skippedItemCount} items due to missing or empty 'pr_codenum'.`);
+    // Optionally, log the actual skipped items if it's not too verbose
+    // processedItems.forEach(item => {
+    //   if (!item.pr_codenum || item.pr_codenum.trim() === "") {
+    //     console.warn('[Data Quality] Skipped item:', item);
+    //   }
+    // });
+  }
+
+  const itemsWs = XLSX.utils.json_to_sheet(filteredItems);
   
   // Use the PDF name (without .pdf) for the Excel file
   const excelFileName = fileName.replace('.pdf', '.xlsx');
