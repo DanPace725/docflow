@@ -120,8 +120,9 @@ export const analyzeDocument = async (
     const modelId = 'prebuilt-document';
 
     // Retry mechanism configuration
-    const maxRetries = 3;
-    const initialDelay = 1000; // in milliseconds
+    const maxRetries = 3; // Total 4 attempts (1 initial + 3 retries)
+    const initialDelay = 3000; // Increased initial delay to 3 seconds
+    const maxDelay = 30000; // Maximum delay of 30 seconds for exponential backoff
 
     let poller;
     let result;
@@ -129,17 +130,61 @@ export const analyzeDocument = async (
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
+        console.log(`Azure Form Recognizer: Attempt ${attempt + 1} for document ${file.name}`);
         poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
         result = await poller.pollUntilDone();
+        console.log(`Azure Form Recognizer: Successfully analyzed document ${file.name} on attempt ${attempt + 1}`);
         break; // Success, exit loop
-      } catch (error) {
+      } catch (error: any) { // Explicitly type error as any to access properties
         lastError = error;
+        console.warn(`Azure Form Recognizer: Attempt ${attempt + 1} for document ${file.name} failed.`);
+
         if (attempt < maxRetries) {
-          const delay = initialDelay * Math.pow(2, attempt);
-          console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay}ms...`, error);
+          let delay = initialDelay * Math.pow(2, attempt); // Default exponential backoff
+
+          // Check for Azure SDK specific retry information
+          if (error.statusCode === 429) { // "Too Many Requests"
+            console.warn("Azure Form Recognizer: Received 429 (Too Many Requests).");
+            let suggestedDelayMs: number | undefined;
+
+            // Prefer error.retryAfterInMs if available (newer SDK versions)
+            if (typeof error.retryAfterInMs === 'number') {
+              suggestedDelayMs = error.retryAfterInMs;
+              console.log(`Using Azure SDK provided error.retryAfterInMs: ${suggestedDelayMs}ms`);
+            }
+            // Fallback to checking headers for 'retry-after' (older SDKs or direct RESTError)
+            // The header value is usually in seconds.
+            else if (error.response?.headers?.get("retry-after")) {
+              const retryAfterSeconds = parseInt(error.response.headers.get("retry-after")!, 10);
+              if (!isNaN(retryAfterSeconds)) {
+                suggestedDelayMs = retryAfterSeconds * 1000;
+                console.log(`Using 'retry-after' header: ${retryAfterSeconds}s => ${suggestedDelayMs}ms`);
+              }
+            }
+             // Check if the error message itself contains a retry period (common in Azure messages)
+            else {
+                const messageMatch = error.message?.match(/retry after (\d+) seconds/i);
+                if (messageMatch && messageMatch[1]) {
+                    const retryAfterSeconds = parseInt(messageMatch[1], 10);
+                    if (!isNaN(retryAfterSeconds)) {
+                        suggestedDelayMs = retryAfterSeconds * 1000;
+                        console.log(`Parsed 'retry after X seconds' from error message: ${retryAfterSeconds}s => ${suggestedDelayMs}ms`);
+                    }
+                }
+            }
+
+            if (suggestedDelayMs !== undefined && suggestedDelayMs > 0) {
+              delay = suggestedDelayMs; // Use the service-suggested delay
+            }
+          }
+
+          // Cap the delay to maxDelay
+          delay = Math.min(delay, maxDelay);
+
+          console.warn(`Azure Form Recognizer: Retrying document ${file.name} in ${delay}ms... (Attempt ${attempt + 1}/${maxRetries + 1})`, error.message || error);
           await new Promise(resolve => setTimeout(resolve, delay));
         } else {
-          console.error(`All ${maxRetries + 1} attempts failed.`, error);
+          console.error(`Azure Form Recognizer: All ${maxRetries + 1} attempts failed for document ${file.name}.`, error);
           throw lastError; // Re-throw the last error after all retries
         }
       }
@@ -196,65 +241,73 @@ export const generateExcelOutput = async (
   documentType: string,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {  // Changed return type here
-  console.log('[Data Quality] Starting data processing for Excel generation...');
+  console.log('[Data Quality] Starting data processing for Excel generation (revised rules)...');
   const processedItems = data.items.map((item, index) => {
-    const newItem: POItem = {};
-    let warnings = [];
+    const newItem: POItem = {} as POItem; // Initialize with type assertion
+    let warnings: string[] = [];
 
-    // pr_codenum
-    if (item.pr_codenum === null || item.pr_codenum === undefined || String(item.pr_codenum).trim() === "") {
-      newItem.pr_codenum = null;
-      // This case is handled by the filter later, but good to note if it was initially problematic
-      if (item.pr_codenum !== null && item.pr_codenum !== undefined) { // Log if it was not already null/undefined
-          warnings.push(`Original 'pr_codenum' was present but empty/whitespace, now null.`);
-      }
-    } else if (typeof item.pr_codenum === 'string') {
-      const trimmedPrCodeNum = item.pr_codenum.trim();
-      if (item.pr_codenum !== trimmedPrCodeNum) {
-        warnings.push(`Trimmed 'pr_codenum' from "${item.pr_codenum}" to "${trimmedPrCodeNum}".`);
-      }
-      newItem.pr_codenum = trimmedPrCodeNum;
-    } else {
-      warnings.push(`Original 'pr_codenum' ("${item.pr_codenum}") was not a string, set to null.`);
-      newItem.pr_codenum = null;
-    }
-
-    // description
-    if (item.description === null || item.description === undefined || String(item.description).trim() === "") {
-      newItem.description = null;
-      if (item.description !== null && item.description !== undefined) {
-           warnings.push(`Original 'description' was present but empty/whitespace, now null.`);
-      }
-    } else if (typeof item.description === 'string') {
-      const trimmedDescription = item.description.trim();
-      if (item.description !== trimmedDescription) {
-        warnings.push(`Trimmed 'description' from "${item.description}" to "${trimmedDescription}".`);
-      }
-      newItem.description = trimmedDescription;
-    } else {
-      warnings.push(`Original 'description' ("${item.description}") was not a string, set to null.`);
-      newItem.description = null;
-    }
-
-    const parseNumeric = (val: any, fieldName: string): number | null => {
-      if (typeof val === 'number') return val;
-      if (val === null || val === undefined || String(val).trim() === "") return null;
-      const num = parseFloat(String(val));
-      if (isNaN(num)) {
-        warnings.push(`Could not parse '${fieldName}' value ("${val}") to a number, set to null.`);
+    // Helper function to process string fields
+    const processStringField = (value: any, fieldName: string): string | null => {
+      if (value === null || value === undefined) {
+        // warnings.push(`Field '${fieldName}' was originally null or undefined.`);
         return null;
       }
-      if (String(val) !== String(num)) { // e.g. "010" vs 10, or "12.3.4" vs 12.3
-           warnings.push(`Numeric conversion for '${fieldName}': original "${val}", parsed to "${num}".`);
+      let strValue = String(value);
+      const trimmedValue = strValue.trim();
+
+      if (strValue !== trimmedValue && trimmedValue !== "") {
+        warnings.push(`Trimmed '${fieldName}' from "${strValue}" to "${trimmedValue}".`);
+      }
+
+      if (trimmedValue === "") {
+        if (strValue !== "") { // It became empty only after trimming
+           warnings.push(`Field '${fieldName}' ("${strValue}") became empty after trimming, set to null.`);
+        } else {
+           // warnings.push(`Field '${fieldName}' was originally empty string.`);
+        }
+        return null; // Represents a blank cell
+      }
+      return trimmedValue;
+    };
+
+    // Helper function to process numeric fields (preserve string if not parsable)
+    const processNumericField = (value: any, fieldName: string): number | string | null => {
+      if (value === null || value === undefined) {
+        // warnings.push(`Field '${fieldName}' (numeric) was originally null or undefined.`);
+        return null;
+      }
+
+      let strValue = String(value).trim(); // Trim first
+      if (strValue === "") {
+          // warnings.push(`Field '${fieldName}' (numeric) was originally empty or whitespace string.`);
+          return null; // Blank cell
+      }
+
+      // Attempt to remove common currency symbols and thousand separators for robust parsing
+      const cleanedStrValue = strValue.replace(/[\$,]/g, '');
+
+      const num = parseFloat(cleanedStrValue);
+
+      if (isNaN(num)) {
+        warnings.push(`Could not parse '${fieldName}' value ("${strValue}") as a number. Preserving original trimmed string: "${strValue}".`);
+        return strValue; // Preserve original (trimmed) string if not a number
+      }
+
+      if (strValue !== String(num) && cleanedStrValue !== String(num)) { // Log if cleaning or parsing changed representation
+         warnings.push(`Numeric conversion for '${fieldName}': original "${strValue}", parsed to ${num}.`);
       }
       return num;
     };
 
-    newItem.pu_quant = parseNumeric(item.pu_quant, 'pu_quant');
-    newItem.pu_price = parseNumeric(item.pu_price, 'pu_price');
-    newItem.total = parseNumeric(item.total, 'total');
+    newItem.pr_codenum = processStringField(item.pr_codenum, 'pr_codenum');
+    newItem.description = processStringField(item.description, 'description');
 
-    // Retain other properties
+    newItem.pu_quant = processNumericField(item.pu_quant, 'pu_quant');
+    newItem.pu_price = processNumericField(item.pu_price, 'pu_price');
+    newItem.total = processNumericField(item.total, 'total');
+
+    // Retain any other properties from the original item
+    // This ensures any fields not explicitly processed are still carried over.
     for (const key in item) {
       if (!(key in newItem) && item.hasOwnProperty(key)) {
         (newItem as any)[key] = (item as any)[key];
@@ -262,27 +315,21 @@ export const generateExcelOutput = async (
     }
 
     if (warnings.length > 0) {
-      console.warn(`[Data Quality] Item at index ${index} (original data):`, item, 'Warnings:', warnings.join('; '));
+      console.warn(`[Data Quality] Item at index ${index} (original data):`, JSON.parse(JSON.stringify(item)), 'Processed to:', JSON.parse(JSON.stringify(newItem)), 'Warnings:', warnings.join('; '));
     }
     return newItem;
   });
-  console.log('[Data Quality] Finished data processing.');
+  console.log('[Data Quality] Finished data processing (revised rules).');
 
   const wb = XLSX.utils.book_new();
-  const filteredItems = processedItems.filter(item => item.pr_codenum && item.pr_codenum.trim() !== "");
+  // const filteredItems = processedItems.filter(item => item.pr_codenum && item.pr_codenum.trim() !== ""); // Filtering removed
 
-  const skippedItemCount = processedItems.length - filteredItems.length;
-  if (skippedItemCount > 0) {
-    console.warn(`[Data Quality] Skipped ${skippedItemCount} items due to missing or empty 'pr_codenum'.`);
-    // Optionally, log the actual skipped items if it's not too verbose
-    // processedItems.forEach(item => {
-    //   if (!item.pr_codenum || item.pr_codenum.trim() === "") {
-    //     console.warn('[Data Quality] Skipped item:', item);
-    //   }
-    // });
-  }
+  // const skippedItemCount = processedItems.length - filteredItems.length; // Logging for skipped items removed
+  // if (skippedItemCount > 0) {
+  //   console.warn(`[Data Quality] Skipped ${skippedItemCount} items due to missing or empty 'pr_codenum'.`);
+  // }
 
-  const itemsWs = XLSX.utils.json_to_sheet(filteredItems);
+  const itemsWs = XLSX.utils.json_to_sheet(processedItems); // Use processedItems directly
   
   // Use the PDF name (without .pdf) for the Excel file
   const excelFileName = fileName.replace('.pdf', '.xlsx');
