@@ -317,6 +317,10 @@ export const generateExcelOutput = async (
     if (warnings.length > 0) {
       console.warn(`[Data Quality] Item at index ${index} (original data):`, JSON.parse(JSON.stringify(item)), 'Processed to:', JSON.parse(JSON.stringify(newItem)), 'Warnings:', warnings.join('; '));
     }
+      // Unconditional log for every item
+      console.log(`[Data Quality] Processing Item ${index}:`,
+                  { original: JSON.parse(JSON.stringify(item)), processed: JSON.parse(JSON.stringify(newItem)), itemWarnings: warnings.length > 0 ? warnings.join('; ') : 'No warnings' }
+      );
     return newItem;
   });
   console.log('[Data Quality] Finished data processing (revised rules).');
