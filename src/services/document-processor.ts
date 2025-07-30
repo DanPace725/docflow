@@ -137,49 +137,52 @@ const extractInvoiceData = (result: any): InvoiceData => {
   const document = result.documents[0];
   const fields = document.fields;
 
-  // Helper to get field value or return undefined
-  const getFieldValue = (fieldName: string, type: 'string' | 'number' | 'date' = 'string') => {
-    if (!fields[fieldName]) return undefined;
+  // Helper to get field value, handling different types including currency
+  const getFieldValue = (field: any) => {
+    if (!field) return undefined;
 
-    const field = fields[fieldName];
-    if (type === 'number' && typeof field.value === 'number') {
-      return field.value;
+    switch (field.type) {
+      case 'string':
+        return field.value;
+      case 'date':
+        return field.value?.toString();
+      case 'number':
+        return field.value;
+      case 'currency':
+        return field.value?.amount; // Correctly access the amount from the currency object
+      default:
+        return field.content || undefined;
     }
-    if (type === 'date' && field.value) {
-      return field.value.toString();
-    }
-    if (type === 'string' && typeof field.value === 'string') {
-      return field.value;
-    }
-    // Handle cases where value is not the expected type by returning its content or undefined
-    return field.content || undefined;
   };
 
   const details: InvoiceDetails = {
-    InvoiceId: getFieldValue('InvoiceId'),
-    InvoiceDate: getFieldValue('InvoiceDate', 'date'),
-    DueDate: getFieldValue('DueDate', 'date'),
-    VendorName: getFieldValue('VendorName'),
-    VendorAddress: getFieldValue('VendorAddress'),
-    CustomerName: getFieldValue('CustomerName'),
-    CustomerAddress: getFieldValue('CustomerAddress'),
-    SubTotal: getFieldValue('SubTotal', 'number'),
-    TotalTax: getFieldValue('TotalTax', 'number'),
-    InvoiceTotal: getFieldValue('InvoiceTotal', 'number'),
+    InvoiceId: getFieldValue(fields.InvoiceId),
+    InvoiceDate: getFieldValue(fields.InvoiceDate),
+    DueDate: getFieldValue(fields.DueDate),
+    VendorName: getFieldValue(fields.VendorName),
+    VendorAddress: getFieldValue(fields.VendorAddress),
+    CustomerName: getFieldValue(fields.CustomerName),
+    CustomerAddress: getFieldValue(fields.CustomerAddress),
+    SubTotal: getFieldValue(fields.SubTotal),
+    TotalTax: getFieldValue(fields.TotalTax),
+    InvoiceTotal: getFieldValue(fields.InvoiceTotal),
   };
 
   const items: InvoiceItem[] = [];
-  if (fields.Items && fields.Items.values) {
+  if (fields.Items && fields.Items.type === 'array') {
     for (const itemField of fields.Items.values) {
-      const item: InvoiceItem = {
-        Description: itemField.properties.Description?.value,
-        Quantity: itemField.properties.Quantity?.value,
-        Unit: itemField.properties.Unit?.value,
-        UnitPrice: itemField.properties.UnitPrice?.value,
-        ProductCode: itemField.properties.ProductCode?.value,
-        Amount: itemField.properties.Amount?.value,
-      };
-      items.push(item);
+      if (itemField.type === 'object') {
+        const props = itemField.properties;
+        const item: InvoiceItem = {
+          Description: getFieldValue(props.Description),
+          Quantity: getFieldValue(props.Quantity),
+          Unit: getFieldValue(props.Unit),
+          UnitPrice: getFieldValue(props.UnitPrice),
+          ProductCode: getFieldValue(props.ProductCode),
+          Amount: getFieldValue(props.Amount),
+        };
+        items.push(item);
+      }
     }
   }
 
