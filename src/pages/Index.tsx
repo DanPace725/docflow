@@ -15,6 +15,8 @@ import {
   analyzeDocument,
   splitPdf,
   generateExcelOutput,
+  generateAggregatedExcelOutput,
+  InvoiceItem,
   //pullPrices as pullPricesService,
   //batchClean as batchCleanService
 } from '@/services/document-processor';
@@ -31,6 +33,16 @@ const Index: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string>('Ready to process files');
   const [progress, setProgress] = useState<number>(0);
   
+  // Helper to trigger download
+  const triggerDownload = (url: string, fileName: string) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   // Processing logic
   const handleProcess = async () => {
     if (files.length === 0) {
@@ -52,33 +64,42 @@ const Index: React.FC = () => {
         setStatusMessage(`Processing file ${i + 1} of ${files.length}: ${file.name}`);
         setProgress(Math.round((i / files.length) * 70) + 10);
         
-        // Split PDF into pages if needed
         const pages = await splitPdf(file);
-        
+        let aggregatedLineItems: InvoiceItem[] = [];
+
         // Process each page
         for (let j = 0; j < pages.length; j++) {
           const page = pages[j];
           setStatusMessage(`Analyzing page ${j + 1} of ${pages.length} from file ${i + 1}`);
           
-          // Analyze the document
           const result = await analyzeDocument(page, documentType);
           
           if (result.success && result.data) {
-            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
-            setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-            
-            // Create and click link for download
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = excelFileName;
-            link.click();
+            if (documentType === 'invoice' && multiPage) {
+              // Aggregate line items for multi-page invoices
+              if ('details' in result.data) { // Type guard for InvoiceData
+                aggregatedLineItems.push(...result.data.items);
+              }
+            } else {
+              // Process and download immediately for single-page or non-invoices
+              const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
+              setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+              triggerDownload(url, excelFileName);
+            }
           } else {
             pagesWithErrors++;
             const errorMessage = `Failed to process page: ${page.name}. Error: ${result.error || 'No data found'}`;
             toast.error(errorMessage);
             overallErrorMessage += `${errorMessage}\n`;
-            // Continue to the next page/file without throwing an error that stops the batch
           }
+        }
+
+        // After processing all pages, generate aggregated file if needed
+        if (documentType === 'invoice' && multiPage && aggregatedLineItems.length > 0) {
+          setStatusMessage(`Generating aggregated report for ${file.name}`);
+          const { url, fileName: excelFileName } = await generateAggregatedExcelOutput(aggregatedLineItems, file.name);
+          setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+          triggerDownload(url, excelFileName);
         }
       }
       
@@ -99,8 +120,6 @@ const Index: React.FC = () => {
       }
       
     } catch (error) {
-      // This catch block will now primarily handle unexpected errors, 
-      // rather than errors from analyzeDocument which are handled above.
       setStatus('error');
       const unexpectedErrorMessage = `Unexpected error during processing: ${error instanceof Error ? error.message : 'Unknown error'}`;
       setStatusMessage(unexpectedErrorMessage);

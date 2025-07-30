@@ -22,9 +22,36 @@ export interface POItem {
   pr_codenum?: string;  // replaces productCode
 }
 
+export interface InvoiceDetails {
+  InvoiceId?: string;
+  InvoiceDate?: string;
+  DueDate?: string;
+  VendorName?: string;
+  VendorAddress?: string;
+  CustomerName?: string;
+  CustomerAddress?: string;
+  SubTotal?: number;
+  TotalTax?: number;
+  InvoiceTotal?: number;
+}
+
+export interface InvoiceItem {
+  Description?: string;
+  Quantity?: number;
+  Unit?: string;
+  UnitPrice?: number;
+  ProductCode?: string;
+  Amount?: number;
+}
+
+export interface InvoiceData {
+  details: InvoiceDetails;
+  items: InvoiceItem[];
+}
+
 export interface ProcessingResult {
   success: boolean;
-  data?: PurchaseOrderData;
+  data?: PurchaseOrderData | InvoiceData;
   error?: string;
 }
 
@@ -105,6 +132,60 @@ export const splitPdf = async (file: File): Promise<File[]> => {
 };
 
 
+// Helper function to extract and map invoice data from Azure result
+const extractInvoiceData = (result: any): InvoiceData => {
+  const document = result.documents[0];
+  const fields = document.fields;
+
+  // Helper to get field value or return undefined
+  const getFieldValue = (fieldName: string, type: 'string' | 'number' | 'date' = 'string') => {
+    if (!fields[fieldName]) return undefined;
+
+    const field = fields[fieldName];
+    if (type === 'number' && typeof field.value === 'number') {
+      return field.value;
+    }
+    if (type === 'date' && field.value) {
+      return field.value.toString();
+    }
+    if (type === 'string' && typeof field.value === 'string') {
+      return field.value;
+    }
+    // Handle cases where value is not the expected type by returning its content or undefined
+    return field.content || undefined;
+  };
+
+  const details: InvoiceDetails = {
+    InvoiceId: getFieldValue('InvoiceId'),
+    InvoiceDate: getFieldValue('InvoiceDate', 'date'),
+    DueDate: getFieldValue('DueDate', 'date'),
+    VendorName: getFieldValue('VendorName'),
+    VendorAddress: getFieldValue('VendorAddress'),
+    CustomerName: getFieldValue('CustomerName'),
+    CustomerAddress: getFieldValue('CustomerAddress'),
+    SubTotal: getFieldValue('SubTotal', 'number'),
+    TotalTax: getFieldValue('TotalTax', 'number'),
+    InvoiceTotal: getFieldValue('InvoiceTotal', 'number'),
+  };
+
+  const items: InvoiceItem[] = [];
+  if (fields.Items && fields.Items.values) {
+    for (const itemField of fields.Items.values) {
+      const item: InvoiceItem = {
+        Description: itemField.properties.Description?.value,
+        Quantity: itemField.properties.Quantity?.value,
+        Unit: itemField.properties.Unit?.value,
+        UnitPrice: itemField.properties.UnitPrice?.value,
+        ProductCode: itemField.properties.ProductCode?.value,
+        Amount: itemField.properties.Amount?.value,
+      };
+      items.push(item);
+    }
+  }
+
+  return { details, items };
+};
+
 // Function to analyze documents with Azure Form Recognizer
 export const analyzeDocument = async (
   file: File,
@@ -116,7 +197,7 @@ export const analyzeDocument = async (
     const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
     
     const fileBuffer = await file.arrayBuffer();
-    const modelId = 'prebuilt-document';
+    const modelId = documentType === 'invoice' ? 'prebuilt-invoice' : 'prebuilt-document';
 
     // Retry mechanism configuration
     const maxRetries = MAX_RETRIES;
@@ -196,96 +277,107 @@ export const analyzeDocument = async (
       }
     }
 
-    if (result && result.tables?.length) {
-      // Process each table like in Python
-      const processedTables = result.tables.map(table => {
-        // Extract raw table data
-        const tableData = extractTableData(table);
-        // Process headers and data
-        const processedData = replaceImportHeaders(tableData);
-        
-        // Convert to POItems
-        const headers = processedData[0];
-        const items = processedData.slice(1).map(row => {
-          const item: any = {};
-          
-          headers.forEach((header, index) => {
-            const value = row[index];
-            // Try to convert to number if possible, otherwise keep as string
-            item[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
+    if (result) {
+      if (documentType === 'invoice') {
+        if (result.documents && result.documents.length > 0) {
+          const invoiceData = extractInvoiceData(result);
+          return { success: true, data: invoiceData };
+        } else {
+          return { success: false, error: 'No invoice data found in document' };
+        }
+      } else { // 'purchase-order'
+        if (result.tables && result.tables.length > 0) {
+          const processedTables = result.tables.map(table => {
+            const tableData = extractTableData(table);
+            const processedData = replaceImportHeaders(tableData);
+
+            const headers = processedData[0];
+            const items = processedData.slice(1).map(row => {
+              const item: any = {};
+              headers.forEach((header, index) => {
+                const value = row[index];
+                item[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
+              });
+              return item;
+            });
+            return items;
           });
           
-          return item;
-        });
-        
-        return items;
-      });
-      
-      // Combine all tables' items
-      const items = processedTables.flat();
-      
-      const poData: PurchaseOrderData = {
-        items,
-        poNumber: '',
-        poDate: '',
-        vendor: '',
-        total: items.reduce((sum, item) => sum + (item.total || 0), 0)
-      };
-
-      return { success: true, data: poData };
+          const items = processedTables.flat();
+          const poData: PurchaseOrderData = {
+            items,
+            poNumber: '',
+            poDate: '',
+            vendor: '',
+            total: items.reduce((sum, item) => sum + (item.total || 0), 0)
+          };
+          return { success: true, data: poData };
+        } else {
+          return { success: false, error: 'No table data found in document' };
+        }
+      }
     }
     
-    return { success: false, error: 'No table data found in document' };
+    return { success: false, error: 'No result from Azure Form Recognizer' };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
 };
 
-// Function to generate Excel output - simplified for line items only
+// Function to generate Excel output
 export const generateExcelOutput = async (
-  data: PurchaseOrderData,
+  data: PurchaseOrderData | InvoiceData,
   documentType: string,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {
-  // Sanitize items data for Excel generation
-  const sanitizedItems = data.items.map(item => {
-    const sanitizedItem: POItem = {}; // Create a new object based on POItem structure
+  const wb = XLSX.utils.book_new();
+  const excelFileName = fileName.replace('.pdf', '.xlsx');
 
-    // Iterate over keys of a POItem, which are known
-    // (description, pu_quant, pu_price, total, pr_codenum)
-    // Or iterate over keys of the item itself if dynamic keys are possible,
-    // but POItem structure is fixed.
+  if (documentType === 'invoice' && 'details' in data) {
+    // Handle InvoiceData
+    const invoiceData = data as InvoiceData;
 
-    (Object.keys(item) as Array<keyof POItem>).forEach(key => {
-      const value = item[key];
-      if (typeof value === 'string' && value.trim() === '') {
-        // If string is empty or only whitespace, set to null for Excel
-        (sanitizedItem as any)[key] = null;
-      } else {
-        // Otherwise, keep the original value
-        (sanitizedItem as any)[key] = value;
-      }
+    // Create 'Invoice Details' sheet
+    const detailsWs = XLSX.utils.json_to_sheet([invoiceData.details]);
+    XLSX.utils.book_append_sheet(wb, detailsWs, 'Invoice Details');
+
+    // Create 'Line Items' sheet
+    const itemsWs = XLSX.utils.json_to_sheet(invoiceData.items);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
+
+  } else if (documentType === 'purchase-order' && 'items' in data) {
+    // Handle PurchaseOrderData
+    const poData = data as PurchaseOrderData;
+    const sanitizedItems = poData.items.map(item => {
+      const sanitizedItem: POItem = {};
+      (Object.keys(item) as Array<keyof POItem>).forEach(key => {
+        const value = item[key];
+        (sanitizedItem as any)[key] = (typeof value === 'string' && value.trim() === '') ? null : value;
+      });
+      return sanitizedItem;
     });
 
-    // Ensure all potential POItem keys are present if you want to maintain a consistent shape,
-    // even if they were undefined in the original item.
-    // However, XLSX.utils.json_to_sheet handles missing keys by not creating columns for them
-    // or creating empty cells if headers are explicitly provided.
-    // The current approach of only copying existing keys is fine.
-    // If a key was undefined in original item, it remains undefined in sanitizedItem,
-    // which XLSX handles as an empty cell.
+    const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
+  }
 
-    return sanitizedItem;
-  });
+  const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
+  const url = URL.createObjectURL(blob);
+  return { url, fileName: excelFileName };
+};
+
+export const generateAggregatedExcelOutput = async (
+  items: InvoiceItem[],
+  baseFileName: string
+): Promise<{ url: string; fileName: string }> => {
   const wb = XLSX.utils.book_new();
-  // Use sanitizedItems for generating the worksheet
-  const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
-  
-  const excelFileName = fileName.replace('.pdf', '.xlsx');
-  
-  XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
-  
+  const excelFileName = baseFileName.replace('.pdf', '_aggregated.xlsx');
+
+  const itemsWs = XLSX.utils.json_to_sheet(items);
+  XLSX.utils.book_append_sheet(wb, itemsWs, 'Aggregated Line Items');
+
   const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   

@@ -1,4 +1,4 @@
-import { analyzeDocument, ProcessingResult, PurchaseOrderData, POItem } from './document-processor';
+import { analyzeDocument, generateExcelOutput, generateAggregatedExcelOutput, ProcessingResult, PurchaseOrderData, POItem, InvoiceData, InvoiceItem } from './document-processor';
 import { DocumentAnalysisClient, PollerLike, AnalyzeResult, AnalyzedDocument } from '@azure/ai-form-recognizer';
 import { vi, describe, it, expect, beforeEach, afterEach, SpyInstance } from 'vitest';
 import * as XLSX from 'xlsx'; // Import for type usage if needed by mock, and for accessing mocked members
@@ -284,8 +284,78 @@ describe('analyzeDocument', () => {
 
 });
 
+describe('analyzeDocument with Invoice', () => {
+    let mockBeginAnalyzeDocument: SpyInstance;
+    let mockPollUntilDone: SpyInstance;
+    let mockDocumentAnalysisClientInstance: any;
+
+    beforeEach(() => {
+        mockPollUntilDone = vi.fn();
+        mockBeginAnalyzeDocument = vi.fn(() => ({ pollUntilDone: mockPollUntilDone } as any));
+        mockDocumentAnalysisClientInstance = { beginAnalyzeDocument: mockBeginAnalyzeDocument };
+        (DocumentAnalysisClient as any).mockImplementation(() => mockDocumentAnalysisClientInstance);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('should call beginAnalyzeDocument with prebuilt-invoice modelId for invoices', async () => {
+        const mockFile = new File(['dummy invoice'], 'invoice.pdf', { type: 'application/pdf' });
+        const mockAnalyzeResult = {
+            documents: [{
+                docType: 'invoice',
+                fields: {
+                    InvoiceId: { value: 'INV-123', content: 'INV-123' },
+                    Items: { values: [] }
+                }
+            }]
+        };
+        mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
+
+        await analyzeDocument(mockFile, 'invoice');
+
+        expect(mockBeginAnalyzeDocument).toHaveBeenCalledWith('prebuilt-invoice', expect.any(Object));
+    });
+
+    it('should parse invoice data correctly on success', async () => {
+        const mockFile = new File(['dummy invoice'], 'invoice.pdf', { type: 'application/pdf' });
+        const mockAnalyzeResult = {
+            documents: [{
+                docType: 'invoice',
+                fields: {
+                    InvoiceId: { value: 'INV-123' },
+                    InvoiceTotal: { value: 150.75 },
+                    Items: {
+                        values: [
+                            { properties: { Description: { value: 'Item 1' }, Amount: { value: 100 } } },
+                            { properties: { Description: { value: 'Item 2' }, Quantity: { value: 2 }, UnitPrice: { value: 25.375 }, Amount: { value: 50.75 } } }
+                        ]
+                    }
+                }
+            }]
+        };
+        mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
+
+        const result = await analyzeDocument(mockFile, 'invoice');
+
+        expect(result.success).toBe(true);
+        if (result.success && result.data && 'details' in result.data) {
+            expect(result.data.details.InvoiceId).toBe('INV-123');
+            expect(result.data.details.InvoiceTotal).toBe(150.75);
+            expect(result.data.items).toHaveLength(2);
+            expect(result.data.items[0].Description).toBe('Item 1');
+            expect(result.data.items[1].Amount).toBe(50.75);
+        } else {
+            fail('Result was not successful or did not contain InvoiceData');
+        }
+    });
+});
+
 describe('generateExcelOutput', () => {
   let mockJsonToSheet: SpyInstance;
+  let mockBookNew: SpyInstance;
+  let mockBookAppendSheet: SpyInstance;
 
   beforeEach(() => {
     // Reset mocks before each test
@@ -307,23 +377,27 @@ describe('generateExcelOutput', () => {
   });
 
   afterEach(() => {
-    // vi.restoreAllMocks(); // This is good, but if URL.createObjectURL was spied here, it handles it.
-                           // If it was globally mocked, this won't touch it unless we spied on the global mock.
-                           // Let's rely on vi.clearAllMocks() for general mock state and specific spies for restore.
-    // If we spied on globalThis.URL.createObjectURL in beforeEach, restore it.
-    if (vi.isMockFunction(globalThis.URL.createObjectURL) && (globalThis.URL.createObjectURL as any).mockRestore) {
-      (globalThis.URL.createObjectURL as any).mockRestore();
-    }
-    // If we used vi.clearAllMocks(), specific mock function states are cleared.
-    // vi.restoreAllMocks() is generally more thorough for spies.
-    // For robust cleanup with potential global mocks, it's tricky.
-    // Given the setup, vi.clearAllMocks in beforeEach is the primary reset.
-    // Let's ensure afterEach properly cleans up spies made within this describe block.
-    vi.restoreAllMocks(); // This should handle spies created with vi.spyOn in this block's beforeEach
+    vi.restoreAllMocks();
   });
 
-  // Test case to be modified:
-  it('should sanitize string properties to null AND preserve numbers (incl 0), nulls, and undefined', async () => {
+  it('should create two sheets for invoice documents', async () => {
+    const invoiceData: InvoiceData = {
+        details: { InvoiceId: 'INV-001', InvoiceTotal: 100 },
+        items: [{ Description: 'Test Item', Amount: 100 }]
+    };
+
+    await generateExcelOutput(invoiceData, 'invoice', 'invoice.pdf');
+
+    expect(XLSX.utils.book_new).toHaveBeenCalledTimes(1);
+    expect(XLSX.utils.book_append_sheet).toHaveBeenCalledTimes(2);
+    expect(XLSX.utils.book_append_sheet).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), 'Invoice Details');
+    expect(XLSX.utils.book_append_sheet).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), 'Line Items');
+
+    expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith([invoiceData.details]);
+    expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith(invoiceData.items);
+  });
+
+  it('should sanitize string properties to null AND preserve numbers (incl 0), nulls, and undefined for POs', async () => {
     const purchaseOrderData: PurchaseOrderData = {
       items: [
         // Scenario 1: Empty string description, valid numeric quantity
@@ -408,4 +482,40 @@ describe('generateExcelOutput', () => {
     expect(sanitizedDataPassedToSheet[1].total).toBe(0);
     expect(sanitizedDataPassedToSheet[1].description).toBeUndefined();
   });
+});
+
+describe('generateAggregatedExcelOutput', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        if (!vi.isMockFunction(globalThis.URL.createObjectURL)) {
+            vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => 'mock-url');
+        } else {
+            (globalThis.URL.createObjectURL as SpyInstance).mockClear();
+            (globalThis.URL.createObjectURL as SpyInstance).mockReturnValue('mock-url');
+        }
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('should create one sheet named "Aggregated Line Items"', async () => {
+        const items: InvoiceItem[] = [
+            { Description: 'Aggregated Item 1', Amount: 50 },
+            { Description: 'Aggregated Item 2', Amount: 150 }
+        ];
+
+        await generateAggregatedExcelOutput(items, 'multi-page-invoice.pdf');
+
+        expect(XLSX.utils.book_new).toHaveBeenCalledTimes(1);
+        expect(XLSX.utils.book_append_sheet).toHaveBeenCalledTimes(1);
+        expect(XLSX.utils.book_append_sheet).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), 'Aggregated Line Items');
+        expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith(items);
+    });
+
+    it('should name the output file with an _aggregated suffix', async () => {
+        const items: InvoiceItem[] = [];
+        const result = await generateAggregatedExcelOutput(items, 'my-invoice.pdf');
+        expect(result.fileName).toBe('my-invoice_aggregated.xlsx');
+    });
 });
