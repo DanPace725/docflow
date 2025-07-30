@@ -44,7 +44,10 @@ export interface InvoiceItem {
   Amount?: number;
 }
 
-export type InvoiceData = any; // Temporary for debugging
+export interface InvoiceData {
+  details: InvoiceDetails;
+  items: InvoiceItem[];
+}
 
 export interface ProcessingResult {
   success: boolean;
@@ -132,8 +135,70 @@ export const splitPdf = async (file: File): Promise<File[]> => {
 // Helper function to extract and map invoice data from Azure result
 const extractInvoiceData = (result: any): InvoiceData => {
   const document = result.documents[0];
-  // For debugging, just return the raw fields object
-  return document.fields;
+  const fields = document.fields;
+
+  // Helper to get field value, handling different types including currency
+  const getFieldValue = (field: any) => {
+    if (!field) {
+      return undefined;
+    }
+
+    switch (field.type) {
+      case 'string':
+      case 'date':
+      case 'number':
+        return field.value;
+      case 'currency':
+        // The value of a currency field might be a JSON string, so we parse it.
+        if (typeof field.value === 'string') {
+          try {
+            const currencyObj = JSON.parse(field.value);
+            return currencyObj.amount;
+          } catch (e) {
+            // If parsing fails, return null or log error
+            return null;
+          }
+        }
+        // If it's already an object (as it should be)
+        return field.value?.amount;
+      default:
+        return field.content || undefined;
+    }
+  };
+
+  const details: InvoiceDetails = {
+    InvoiceId: getFieldValue(fields.InvoiceId),
+    InvoiceDate: getFieldValue(fields.InvoiceDate),
+    DueDate: getFieldValue(fields.DueDate),
+    VendorName: getFieldValue(fields.VendorName),
+    VendorAddress: getFieldValue(fields.VendorAddress),
+    CustomerName: getFieldValue(fields.CustomerName),
+    CustomerAddress: getFieldValue(fields.CustomerAddress),
+    SubTotal: getFieldValue(fields.SubTotal),
+    TotalTax: getFieldValue(fields.TotalTax),
+    InvoiceTotal: getFieldValue(fields.InvoiceTotal),
+  };
+
+  const items: InvoiceItem[] = [];
+  if (fields.Items && Array.isArray(fields.Items.values)) {
+    for (const itemField of fields.Items.values) {
+      if (itemField.type === 'object' && itemField.properties) {
+        const props = itemField.properties;
+        const item: InvoiceItem = {
+          Description: getFieldValue(props.Description),
+          // Handle cases where quantity might be under OrderQuantity
+          Quantity: getFieldValue(props.Quantity) ?? getFieldValue(props.OrderQuantity),
+          Unit: getFieldValue(props.Unit),
+          UnitPrice: getFieldValue(props.UnitPrice),
+          ProductCode: getFieldValue(props.ProductCode),
+          Amount: getFieldValue(props.Amount),
+        };
+        items.push(item);
+      }
+    }
+  }
+
+  return { details, items };
 };
 
 // Function to analyze documents with Azure Form Recognizer
@@ -283,41 +348,17 @@ export const generateExcelOutput = async (
   const wb = XLSX.utils.book_new();
   const excelFileName = fileName.replace('.pdf', '.xlsx');
 
-  if (documentType === 'invoice') {
-    // Handle InvoiceData (which is now the raw 'fields' object)
-    const fields = data as any;
+  if (documentType === 'invoice' && 'details' in data) {
+    // Handle InvoiceData
+    const invoiceData = data as InvoiceData;
 
-    // Create a sheet for raw top-level field data
-    const detailsToExport = Object.entries(fields)
-      .filter(([key]) => key !== 'Items')
-      .map(([key, value]: [string, any]) => ({
-        FieldName: key,
-        Type: value.type,
-        Value: value.value ? JSON.stringify(value.value) : null,
-        Content: value.content,
-        Confidence: value.confidence,
-      }));
+    // Create 'Invoice Details' sheet
+    const detailsWs = XLSX.utils.json_to_sheet([invoiceData.details]);
+    XLSX.utils.book_append_sheet(wb, detailsWs, 'Invoice Details');
 
-    const detailsWs = XLSX.utils.json_to_sheet(detailsToExport);
-    XLSX.utils.book_append_sheet(wb, detailsWs, 'Raw Details');
-
-    // Create a sheet for the raw line items, if they exist
-    if (fields.Items && Array.isArray(fields.Items.values)) {
-      const itemsToExport = fields.Items.values.map((item: any, index: number) => {
-        const flatItem: any = { ItemIndex: index };
-        if (item.properties) {
-          for (const [propKey, propValue] of Object.entries(item.properties as any)) {
-            flatItem[`${propKey}_Type`] = propValue.type;
-            flatItem[`${propKey}_Value`] = propValue.value ? JSON.stringify(propValue.value) : null;
-            flatItem[`${propKey}_Content`] = propValue.content;
-            flatItem[`${propKey}_Confidence`] = propValue.confidence;
-          }
-        }
-        return flatItem;
-      });
-      const itemsWs = XLSX.utils.json_to_sheet(itemsToExport);
-      XLSX.utils.book_append_sheet(wb, itemsWs, 'Raw Line Items');
-    }
+    // Create 'Line Items' sheet
+    const itemsWs = XLSX.utils.json_to_sheet(invoiceData.items);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
 
   } else if (documentType === 'purchase-order' && 'items' in data) {
     // Handle PurchaseOrderData
