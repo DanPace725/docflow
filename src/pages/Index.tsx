@@ -15,7 +15,6 @@ import {
   analyzeDocument,
   splitPdf,
   generateExcelOutput,
-  generateAggregatedExcelOutput,
   InvoiceItem,
   //pullPrices as pullPricesService,
   //batchClean as batchCleanService
@@ -25,7 +24,6 @@ const Index: React.FC = () => {
   // State for files and settings
   const [files, setFiles] = useState<File[]>([]);
   const [documentType, setDocumentType] = useState<string>('purchase-order');
-  const [multiPage, setMultiPage] = useState<boolean>(false);
   const [downloadUrls, setDownloadUrls] = useState<Array<{ url: string; fileName: string }>>([]);
   
   // Processing state
@@ -57,34 +55,35 @@ const Index: React.FC = () => {
     let overallErrorMessage = "";
 
     try {
-      // Process each file
+      // Process each uploaded file as a whole document
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        
         setStatusMessage(`Processing file ${i + 1} of ${files.length}: ${file.name}`);
-        setProgress(Math.round((i / files.length) * 70) + 10);
-        
-        const pages = await splitPdf(file);
-        let aggregatedLineItems: InvoiceItem[] = [];
+        setProgress(Math.round(((i + 1) / files.length) * 70) + 10);
 
-        // Process each page
+        const pages = await splitPdf(file);
+
+        let firstPageDetails: any = null;
+        const allLineItems: InvoiceItem[] = [];
+
+        // Process each page of the current document
         for (let j = 0; j < pages.length; j++) {
           const page = pages[j];
-          setStatusMessage(`Analyzing page ${j + 1} of ${pages.length} from file ${i + 1}`);
+          setStatusMessage(`Analyzing page ${j + 1} of ${pages.length} for ${file.name}`);
           
           const result = await analyzeDocument(page, documentType);
           
           if (result.success && result.data) {
-            if (documentType === 'invoice' && multiPage) {
-              // Aggregate line items for multi-page invoices
-              if ('details' in result.data) { // Type guard for InvoiceData
-                aggregatedLineItems.push(...result.data.items);
+            // For purchase orders, aggregate all items
+            if (documentType === 'purchase-order' && 'items' in result.data) {
+              allLineItems.push(...(result.data.items as InvoiceItem[]));
+            }
+            // For invoices, get details from the first page and aggregate items from all pages
+            else if (documentType === 'invoice' && 'details' in result.data) {
+              if (!firstPageDetails) {
+                firstPageDetails = result.data.details;
               }
-            } else {
-              // Process and download immediately for single-page or non-invoices
-              const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
-              setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-              triggerDownload(url, excelFileName);
+              allLineItems.push(...result.data.items);
             }
           } else {
             pagesWithErrors++;
@@ -94,10 +93,15 @@ const Index: React.FC = () => {
           }
         }
 
-        // After processing all pages, generate aggregated file if needed
-        if (documentType === 'invoice' && multiPage && aggregatedLineItems.length > 0) {
-          setStatusMessage(`Generating aggregated report for ${file.name}`);
-          const { url, fileName: excelFileName } = await generateAggregatedExcelOutput(aggregatedLineItems, file.name);
+        // After processing all pages, generate a single consolidated output file
+        if (firstPageDetails || (documentType === 'purchase-order' && allLineItems.length > 0)) {
+          const consolidatedData = {
+            details: firstPageDetails,
+            items: allLineItems,
+          };
+
+          setStatusMessage(`Generating consolidated report for ${file.name}`);
+          const { url, fileName: excelFileName } = await generateExcelOutput(consolidatedData, documentType, file.name);
           setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
           triggerDownload(url, excelFileName);
         }
@@ -225,8 +229,6 @@ const Index: React.FC = () => {
             <SettingsPanel 
               documentType={documentType}
               setDocumentType={setDocumentType}
-              multiPage={multiPage}
-              setMultiPage={setMultiPage}
             />
             {/* Add the download history card here */}
             {downloadUrls.length > 0 && (

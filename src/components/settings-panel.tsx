@@ -7,15 +7,11 @@ import { Label } from "@/components/ui/label";
 interface SettingsPanelProps {
   documentType: string;
   setDocumentType: React.Dispatch<React.SetStateAction<string>>;
-  multiPage: boolean;
-  setMultiPage: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ 
   documentType, 
-  setDocumentType, 
-  multiPage, 
-  setMultiPage 
+  setDocumentType
 }) => {
   return (
     <div className="bg-white rounded-lg shadow-md p-5 space-y-4">
@@ -31,30 +27,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <SelectContent>
               <SelectItem value="purchase-order">Purchase Order</SelectItem>
               <SelectItem value="invoice">Invoice</SelectItem>
-
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground mt-1">
-            Select the type of document you are processing
-          </p>
-        </div>
-
-        <div className="flex items-center justify-between">
-          <Label htmlFor="multi-page" className="cursor-pointer">
-            Multi-page {documentType === "invoice" ? "Invoice" : "Document"}
-          </Label>
-          <Switch
-            id="multi-page"
-            checked={multiPage}
-            onCheckedChange={setMultiPage}
-          />
-        </div>
-
-        <div className="pt-2">
-          <p className="text-sm text-gray-600">
-            {multiPage 
-              ? "The system will process all pages as a single document and aggregate the data." 
-              : "Each page will be processed as an individual document."}
+            Select the type of document to process. The system will automatically handle multiple pages.
           </p>
         </div>
       </div>

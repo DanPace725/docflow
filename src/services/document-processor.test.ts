@@ -1,4 +1,4 @@
-import { analyzeDocument, generateExcelOutput, generateAggregatedExcelOutput, ProcessingResult, PurchaseOrderData, POItem, InvoiceData, InvoiceItem } from './document-processor';
+import { analyzeDocument, generateExcelOutput, ProcessingResult, PurchaseOrderData, POItem, InvoiceData, InvoiceItem } from './document-processor';
 import { DocumentAnalysisClient, PollerLike, AnalyzeResult, AnalyzedDocument } from '@azure/ai-form-recognizer';
 import { vi, describe, it, expect, beforeEach, afterEach, SpyInstance } from 'vitest';
 import * as XLSX from 'xlsx'; // Import for type usage if needed by mock, and for accessing mocked members
@@ -72,10 +72,13 @@ describe('analyzeDocument', () => {
   // Test cases will be added here in subsequent subtasks
   it('should successfully analyze on the first attempt', async () => {
     const mockFile = new File(['dummy content'], 'test.pdf', { type: 'application/pdf' });
-    const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+    // JSDOM's File implementation doesn't have arrayBuffer, so we mock it.
+    mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
+
+    const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
     mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
 
-    const result = await analyzeDocument(mockFile, 'purchaseOrder');
+    const result = await analyzeDocument(mockFile, 'invoice');
 
     expect(result.success).toBe(true);
     expect(result.data).toBeDefined();
@@ -85,15 +88,16 @@ describe('analyzeDocument', () => {
 
       it('should succeed after exponential backoff for a generic error', async () => {
         const mockFile = new File(['dummy content'], 'retry.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const genericError = new Error('Generic service error');
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
 
         // Fail first, then succeed
         mockPollUntilDone
           .mockRejectedValueOnce(genericError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         // Advance timers for the first retry's delay (INITIAL_DELAY_MS = 3000)
         await vi.advanceTimersByTimeAsync(3000);
@@ -111,19 +115,20 @@ describe('analyzeDocument', () => {
 
       it('should succeed using Azure SDK suggested delay (error.retryAfterInMs)', async () => {
         const mockFile = new File(['dummy content'], 'sdk-retry.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const retryAfterMs = 1500;
         const rateLimitError = {
           statusCode: 429,
           message: 'Too many requests, retry after.',
           retryAfterInMs: retryAfterMs
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         await vi.advanceTimersByTimeAsync(retryAfterMs);
 
@@ -139,6 +144,7 @@ describe('analyzeDocument', () => {
 
       it('should permanently fail after exhausting all retries', async () => {
         const mockFile = new File(['dummy content'], 'fail.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const persistentError = new Error('Persistent failure');
 
         // Fail all attempts (initial + 3 retries)
@@ -148,7 +154,7 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(persistentError) // Retry 2
           .mockRejectedValueOnce(persistentError); // Retry 3
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         // Advance timers for all retry delays
         // INITIAL_DELAY_MS = 3000
@@ -174,6 +180,7 @@ describe('analyzeDocument', () => {
 
       it('should succeed using Retry-After header delay', async () => {
         const mockFile = new File(['dummy content'], 'header-retry.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const retryAfterSeconds = 2; // Parsed from header
         const expectedDelayMs = retryAfterSeconds * 1000;
         const rateLimitError = {
@@ -188,13 +195,13 @@ describe('analyzeDocument', () => {
             }
           }
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         await vi.advanceTimersByTimeAsync(expectedDelayMs);
 
@@ -210,6 +217,7 @@ describe('analyzeDocument', () => {
 
       it('should succeed using error message parsed delay', async () => {
         const mockFile = new File(['dummy content'], 'msg-parse-retry.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const retryAfterSecondsInMessage = 5;
         const expectedDelayMs = retryAfterSecondsInMessage * 1000;
         const rateLimitError = {
@@ -217,13 +225,13 @@ describe('analyzeDocument', () => {
           message: `Too many requests, please try again. retry after ${retryAfterSecondsInMessage} seconds. Some other text.`
           // No retryAfterInMs, no headers with retry-after
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         await vi.advanceTimersByTimeAsync(expectedDelayMs);
 
@@ -239,6 +247,7 @@ describe('analyzeDocument', () => {
 
       it('should cap Azure-suggested delay at MAX_DELAY_MS', async () => {
         const mockFile = new File(['dummy content'], 'max-delay-azure.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         // MAX_DELAY_MS is 30000 in the actual code
         const veryLargeRetryAfterMs = 50000; // This exceeds MAX_DELAY_MS
         const expectedCappedDelay = 30000;
@@ -248,14 +257,14 @@ describe('analyzeDocument', () => {
           message: 'Too many requests, high suggested delay.',
           retryAfterInMs: veryLargeRetryAfterMs
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [{ fields: { Items: { values: [] } } }] };
 
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitErrorHighDelay)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'invoice');
 
         await vi.advanceTimersByTimeAsync(expectedCappedDelay); // Advance by the capped delay
 
@@ -302,6 +311,7 @@ describe('analyzeDocument with Invoice', () => {
 
     it('should call beginAnalyzeDocument with prebuilt-invoice modelId for invoices', async () => {
         const mockFile = new File(['dummy invoice'], 'invoice.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const mockAnalyzeResult = {
             documents: [{
                 docType: 'invoice',
@@ -320,16 +330,17 @@ describe('analyzeDocument with Invoice', () => {
 
     it('should parse invoice data correctly on success', async () => {
         const mockFile = new File(['dummy invoice'], 'invoice.pdf', { type: 'application/pdf' });
+        mockFile.arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(10));
         const mockAnalyzeResult = {
             documents: [{
-                docType: 'invoice',
                 fields: {
-                    InvoiceId: { value: 'INV-123' },
-                    InvoiceTotal: { value: 150.75 },
+                    InvoiceId: { type: 'string', value: 'INV-123' },
+                    InvoiceTotal: { type: 'number', value: 150.75 },
                     Items: {
+                        type: 'array',
                         values: [
-                            { properties: { Description: { value: 'Item 1' }, Amount: { value: 100 } } },
-                            { properties: { Description: { value: 'Item 2' }, Quantity: { value: 2 }, UnitPrice: { value: 25.375 }, Amount: { value: 50.75 } } }
+                            { type: 'object', properties: { Description: { type: 'string', value: 'Item 1' }, Amount: { type: 'number', value: 100 } } },
+                            { type: 'object', properties: { Description: { type: 'string', value: 'Item 2' }, Amount: { type: 'number', value: 50.75 } } }
                         ]
                     }
                 }
@@ -419,7 +430,7 @@ describe('generateExcelOutput', () => {
     // mockJsonToSheet is already assigned in beforeEach from the mocked XLSX module
     // Other XLSX mocks (book_new, book_append_sheet, write) should be active from the suite's setup
 
-    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test.pdf');
+    await generateExcelOutput(purchaseOrderData, 'purchase-order', 'test.pdf');
 
     expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
     const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
@@ -468,7 +479,7 @@ describe('generateExcelOutput', () => {
       ],
     };
 
-    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test2.pdf');
+    await generateExcelOutput(purchaseOrderData, 'purchase-order', 'test2.pdf');
 
     expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
     const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
@@ -484,38 +495,3 @@ describe('generateExcelOutput', () => {
   });
 });
 
-describe('generateAggregatedExcelOutput', () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        if (!vi.isMockFunction(globalThis.URL.createObjectURL)) {
-            vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => 'mock-url');
-        } else {
-            (globalThis.URL.createObjectURL as SpyInstance).mockClear();
-            (globalThis.URL.createObjectURL as SpyInstance).mockReturnValue('mock-url');
-        }
-    });
-
-    afterEach(() => {
-        vi.restoreAllMocks();
-    });
-
-    it('should create one sheet named "Aggregated Line Items"', async () => {
-        const items: InvoiceItem[] = [
-            { Description: 'Aggregated Item 1', Amount: 50 },
-            { Description: 'Aggregated Item 2', Amount: 150 }
-        ];
-
-        await generateAggregatedExcelOutput(items, 'multi-page-invoice.pdf');
-
-        expect(XLSX.utils.book_new).toHaveBeenCalledTimes(1);
-        expect(XLSX.utils.book_append_sheet).toHaveBeenCalledTimes(1);
-        expect(XLSX.utils.book_append_sheet).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), 'Aggregated Line Items');
-        expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith(items);
-    });
-
-    it('should name the output file with an _aggregated suffix', async () => {
-        const items: InvoiceItem[] = [];
-        const result = await generateAggregatedExcelOutput(items, 'my-invoice.pdf');
-        expect(result.fileName).toBe('my-invoice_aggregated.xlsx');
-    });
-});

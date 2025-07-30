@@ -382,20 +382,3 @@ export const generateExcelOutput = async (
   const url = URL.createObjectURL(blob);
   return { url, fileName: excelFileName };
 };
-
-export const generateAggregatedExcelOutput = async (
-  items: InvoiceItem[],
-  baseFileName: string
-): Promise<{ url: string; fileName: string }> => {
-  const wb = XLSX.utils.book_new();
-  const excelFileName = baseFileName.replace('.pdf', '_aggregated.xlsx');
-
-  const itemsWs = XLSX.utils.json_to_sheet(items);
-  XLSX.utils.book_append_sheet(wb, itemsWs, 'Aggregated Line Items');
-
-  const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  
-  const url = URL.createObjectURL(blob);
-  return { url, fileName: excelFileName };
-};

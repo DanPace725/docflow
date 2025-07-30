@@ -71,7 +71,8 @@ const FileDropzone: React.FC<FileDropzoneProps> = ({ files, setFiles }) => {
         onClick={() => document.getElementById('file-input')?.click()}
       >
         <input 
-          id="file-input" 
+          id="file-input"
+          data-testid="file-input"
           type="file" 
           multiple 
           accept=".pdf" 
