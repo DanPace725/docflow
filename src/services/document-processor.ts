@@ -169,9 +169,10 @@ const extractInvoiceData = (result: any): InvoiceData => {
   };
 
   const items: InvoiceItem[] = [];
-  if (fields.Items && fields.Items.type === 'array') {
+  // More robust check for the Items array
+  if (fields.Items && Array.isArray(fields.Items.values)) {
     for (const itemField of fields.Items.values) {
-      if (itemField.type === 'object') {
+      if (itemField.type === 'object' && itemField.properties) {
         const props = itemField.properties;
         const item: InvoiceItem = {
           Description: getFieldValue(props.Description),
