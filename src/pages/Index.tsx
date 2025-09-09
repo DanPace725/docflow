@@ -79,6 +79,13 @@ const Index: React.FC = () => {
             overallErrorMessage += `${errorMessage}\n`;
             // Continue to the next page/file without throwing an error that stops the batch
           }
+
+          // Add a 4-second delay to respect API rate limits (F0 tier is 20/minute)
+          // This provides a buffer and prevents hitting the limit exactly.
+          if (i < files.length - 1 || j < pages.length - 1) {
+            setStatusMessage(`Waiting to avoid rate limit...`);
+            await new Promise(resolve => setTimeout(resolve, 4000));
+          }
         }
       }
       
