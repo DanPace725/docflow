@@ -15,12 +15,15 @@ export interface PurchaseOrderData {
 }
 
 export interface POItem {
+  // Core standardized fields (these will exist after header processing)
   description?: string;
-  pu_quant?: number;  // replaces quantity
-  pu_price?: number;  // replaces unitPrice
-  total?: number;     // replaces amount
-  pr_codenum?: string;  // replaces productCode
-}
+  pu_quant?: number;  
+  pu_price?: number;  
+  total?: number;     
+  pr_codenum?: string;  
+  
+  // Allow any additional fields from the original table
+  [key: string]: any;
 
 export interface ProcessingResult {
   success: boolean;
@@ -452,6 +455,7 @@ export const generateExcelOutput = async (
     // Log the first few items to help debug
     if (index < 3) {
       console.log(`Item ${index} columns:`, Object.keys(sanitizedItem));
+      console.log(`Item ${index} sample data:`, sanitizedItem);
     }
     
     return sanitizedItem;
@@ -462,7 +466,12 @@ export const generateExcelOutput = async (
   sanitizedItems.forEach(item => {
     Object.keys(item).forEach(key => allColumns.add(key));
   });
-  console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns));
+  console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns).sort());
+  
+  // Check for our standard columns
+  const standardColumns = ['pu_quant', 'pu_price', 'pr_codenum', 'total'];
+  const foundStandardColumns = standardColumns.filter(col => allColumns.has(col));
+  console.log(`Found standard columns: ${foundStandardColumns.join(', ')}`);
   
   const wb = XLSX.utils.book_new();
   
@@ -480,7 +489,6 @@ export const generateExcelOutput = async (
   
   const url = URL.createObjectURL(blob);
   
-  console.log(`Excel file created: ${excelFileName}`);
+  console.log(`Excel file created: ${excelFileName} with columns: ${Array.from(allColumns).sort().join(', ')}`);
   return { url, fileName: excelFileName };
 };
-
