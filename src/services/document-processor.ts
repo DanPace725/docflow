@@ -15,12 +15,15 @@ export interface PurchaseOrderData {
 }
 
 export interface POItem {
+  // Core standardized fields (these will exist after header processing)
   description?: string;
-  pu_quant?: number;  // replaces quantity
-  pu_price?: number;  // replaces unitPrice
-  total?: number;     // replaces amount
-  pr_codenum?: string;  // replaces productCode
-}
+  pu_quant?: number;  
+  pu_price?: number;  
+  total?: number;     
+  pr_codenum?: string;  
+  
+  // Allow any additional fields from the original table
+  [key: string]: any;}
 
 export interface ProcessingResult {
   success: boolean;
@@ -28,53 +31,377 @@ export interface ProcessingResult {
   error?: string;
 }
 
-// Helper function to extract table data
-const extractTableData = (table: any) => {
-  const rows: string[][] = [];
-  let currentRow = -1;
+// Helper function to detect if a row looks like data instead of headers
+const detectDataRow = (row: string[]): boolean => {
+  // Patterns that suggest this is data, not headers
+  const dataPatterns = [
+    /P\d{2}-\d{3}-\d{3}/, // Part number pattern
+    /^\d+$/, // Pure numbers (quantities)
+    /\$\d+\.\d{2}/, // Dollar amounts
+    /\d+\.\d+/, // Decimal numbers
+    /^\d+\s+P\d{2}/, // Quantity followed by part number
+  ];
   
-  table.cells
-    .sort((a, b) => a.rowIndex - b.rowIndex || a.columnIndex - b.columnIndex)
-    .forEach(cell => {
-      if (cell.rowIndex !== currentRow) {
-        rows.push([]);
-        currentRow = cell.rowIndex;
-      }
-      rows[rows.length - 1].push(cell.content);
-    });
+  // Count how many cells look like data
+  const dataMatches = row.filter(cell => 
+    dataPatterns.some(pattern => pattern.test(cell?.toString() || ''))
+  ).length;
   
-  return rows;
+  // If more than half the cells look like data, treat as data row
+  const threshold = Math.max(1, Math.floor(row.length / 2));
+  return dataMatches >= threshold;
 };
 
-// Helper function to replace headers
-const replaceImportHeaders = (df: any[]) => {
-  if (df.length === 0) return df;
+// Helper function to handle tables without proper headers
+const handleHeaderlessTable = (tableData: string[][]): string[][] => {
+  console.log('Processing headerless table');
   
-  // Convert headers to lowercase but keep original if no match found
-  let headers = df[0].map((h: string) => h.toLowerCase());
+  if (tableData.length === 0) return tableData;
   
-  // Try to enhance headers where we can recognize them
-  headers = headers.map(h => {
-    if (["order", "items", "quantity", "qty"].includes(h)) return "pu_quant";
-    if (["cost", "unit price", "price", "#"].includes(h)) return "pu_price";
-    if (h === "amount" || h === "total") return "total";
-    return h; // Keep original header if no match
-  });
+  // Analyze the structure to create intelligent headers
+  const numColumns = Math.max(...tableData.map(row => row.length));
+  const headers: string[] = [];
   
-  // Check for part number pattern
-  const partNumberPattern = /P\d{2}-\d{3}-\d{3}/;
-  headers.forEach((h, index) => {
-    const hasPartNumber = df.slice(1).some(row => 
-      partNumberPattern.test(row[index]?.toString() || '')
-    );
-    if (hasPartNumber) {
-      headers[index] = 'pr_codenum';
+  // For each column, analyze the data to guess what it might be
+  for (let colIndex = 0; colIndex < numColumns; colIndex++) {
+    const columnValues = tableData.map(row => row[colIndex] || '').filter(v => v.trim() !== '');
+    
+    if (columnValues.length === 0) {
+      headers[colIndex] = `Column_${colIndex + 1}`;
+      continue;
+    }
+    
+    // Check for patterns in this column
+    const hasPartNumbers = columnValues.some(v => /P\d{2}-\d{3}-\d{3}/.test(v));
+    const hasMoneyFirst = columnValues.some(v => /^\$\d+\.\d{2}$/.test(v)); // Unit prices
+    const hasMoneyLast = columnValues.some(v => /^\$\d+\.\d{2}$/.test(v)); // Could be totals
+    const hasQuantities = columnValues.some(v => /^\d+$/.test(v));
+    const hasDimensions = columnValues.some(v => /\d+[\-\/]\d+/.test(v) || /\d+\s*X\s*\d+/.test(v));
+    const hasUnits = columnValues.some(v => /^(EA|EACH|PC|PCS)$/i.test(v));
+    
+    // Assign intelligent column names based on patterns
+    if (hasPartNumbers) {
+      headers[colIndex] = 'pr_codenum';
+    } else if (hasQuantities && colIndex === 0) {
+      headers[colIndex] = 'pu_quant'; // First column with numbers is usually quantity
+    } else if (hasMoneyFirst && colIndex < numColumns - 2) {
+      headers[colIndex] = 'pu_price'; // Money in early columns is usually unit price
+    } else if (hasMoneyLast && colIndex === numColumns - 1) {
+      headers[colIndex] = 'total'; // Last money column is usually total
+    } else if (hasUnits) {
+      headers[colIndex] = 'unit';
+    } else if (hasDimensions) {
+      headers[colIndex] = 'description';
+    } else {
+      // Generic column name
+      headers[colIndex] = `Column_${colIndex + 1}`;
+    }
+  }
+  
+  // Look for duplicate standard headers and rename
+  const standardHeaders = ['pu_quant', 'pu_price', 'total', 'pr_codenum'];
+  const usedStandardHeaders = new Set<string>();
+  
+  headers.forEach((header, index) => {
+    if (standardHeaders.includes(header)) {
+      if (usedStandardHeaders.has(header)) {
+        // Duplicate standard header, make it generic
+        headers[index] = `${header}_${index + 1}`;
+      } else {
+        usedStandardHeaders.add(header);
+      }
     }
   });
   
-  return [headers, ...df.slice(1)];
+  console.log('Generated headers for headerless table:', headers);
+  
+  // Return data with generated headers
+  return [headers, ...tableData];
 };
 
+// Enhanced table extraction that handles missing/irregular cells
+const extractTableData = (table: any) => {
+  if (!table.cells || table.cells.length === 0) {
+    console.warn('Table has no cells');
+    return [];
+  }
+
+  // Find table dimensions
+  const maxRow = Math.max(...table.cells.map(cell => cell.rowIndex));
+  const maxCol = Math.max(...table.cells.map(cell => cell.columnIndex));
+  
+  // Initialize complete grid with empty strings
+  const grid: string[][] = [];
+  for (let r = 0; r <= maxRow; r++) {
+    grid[r] = new Array(maxCol + 1).fill('');
+  }
+  
+  // Fill in the actual cell content
+  table.cells.forEach(cell => {
+    const row = cell.rowIndex;
+    const col = cell.columnIndex;
+    grid[row][col] = cell.content || '';
+  });
+  
+  console.log(`Extracted table: ${grid.length} rows, ${grid[0]?.length || 0} columns`);
+  return grid;
+};
+
+// Enhanced header replacement with collision detection and data preservation
+const replaceImportHeaders = (tableData: string[][]): string[][] => {
+  if (tableData.length === 0) {
+    console.warn('Empty table data provided');
+    return tableData;
+  }
+  
+  // Create a copy to avoid mutating original data
+  const processedData = tableData.map(row => [...row]);
+  let headers = processedData[0].map(h => (h || '').toLowerCase().trim());
+  
+  console.log('Original headers:', headers);
+  
+  // Check if we should process headers at all
+  const targetWords = ["order", "items", "quantity", "qty", "cost", "unit price", "price", "#", "amount", "total", "unit", "each", "ea"];
+  const hasTargetWords = headers.some(h => 
+    targetWords.some(target => h.includes(target))
+  );
+  
+  // Additional check: detect if first row looks like data instead of headers
+  const firstRowLooksLikeData = detectDataRow(processedData[0]);
+  
+  if (!hasTargetWords || firstRowLooksLikeData) {
+    console.log('No target words found in headers OR first row appears to be data - treating as headerless table');
+    return handleHeaderlessTable(processedData);
+  }
+
+  // If we get here, we have proper headers - continue with normal processing
+  console.log('Processing table with proper headers');
+  
+  // Track which standardized headers we've already assigned
+  const assignedStandardHeaders = new Set<string>();
+  const newHeaders = [...headers]; // Start with original headers
+  
+  // Handle "amount" column special positioning logic FIRST
+  const amountIndices = headers
+    .map((h, i) => h === 'amount' ? i : -1)
+    .filter(i => i !== -1);
+    
+  amountIndices.forEach(index => {
+    if (index === 0 && !assignedStandardHeaders.has('pu_quant')) {
+      newHeaders[index] = 'pu_quant';
+      assignedStandardHeaders.add('pu_quant');
+      console.log(`Mapped "amount" at position ${index} (first) to "pu_quant"`);
+    } else if (index === headers.length - 1 && !assignedStandardHeaders.has('total')) {
+      newHeaders[index] = 'total';
+      assignedStandardHeaders.add('total');
+      console.log(`Mapped "amount" at position ${index} (last) to "total"`);
+    }
+  });
+  
+  // Define mapping priorities (first match wins for each standard header)
+  const mappingRules = [
+    {
+      standardName: 'pu_quant',
+      patterns: ['quantity', 'qty', 'order', 'items'],
+      priority: ['quantity', 'qty', 'order', 'items'] // preferred order
+    },
+    {
+      standardName: 'pu_price', 
+      patterns: ['unit price', 'price', 'cost', '#'],
+      priority: ['unit price', 'price', 'cost', '#']
+    },
+    {
+      standardName: 'total',
+      patterns: ['total'],
+      priority: ['total']
+    }
+  ];
+  
+  // Apply mapping rules with collision detection
+  mappingRules.forEach(rule => {
+    if (assignedStandardHeaders.has(rule.standardName)) {
+      return; // Already assigned
+    }
+    
+    // Find the best match based on priority
+    let bestMatch = -1;
+    let bestPriority = Infinity;
+    
+    headers.forEach((header, index) => {
+      // Skip if this position was already standardized
+      if (newHeaders[index] !== header) return;
+      
+      rule.patterns.forEach(pattern => {
+        if (header.includes(pattern)) {
+          const priority = rule.priority.indexOf(pattern);
+          if (priority !== -1 && priority < bestPriority) {
+            bestMatch = index;
+            bestPriority = priority;
+          }
+        }
+      });
+    });
+    
+    if (bestMatch !== -1) {
+      newHeaders[bestMatch] = rule.standardName;
+      assignedStandardHeaders.add(rule.standardName);
+      console.log(`Mapped "${headers[bestMatch]}" to "${rule.standardName}" at index ${bestMatch}`);
+    }
+  });
+  
+  // Handle part number detection
+  if (!assignedStandardHeaders.has('pr_codenum')) {
+    const partNumberPattern = /P\d{2}-\d{3}-\d{3}/;
+    
+    for (let colIndex = 0; colIndex < headers.length; colIndex++) {
+      // Skip if this column was already standardized
+      if (newHeaders[colIndex] !== headers[colIndex]) continue;
+      
+      // Check if this column contains part numbers
+      const hasPartNumber = processedData.slice(1).some(row => {
+        const cellValue = row[colIndex]?.toString() || '';
+        return partNumberPattern.test(cellValue);
+      });
+      
+      if (hasPartNumber) {
+        newHeaders[colIndex] = 'pr_codenum';
+        assignedStandardHeaders.add('pr_codenum');
+        console.log(`Found part numbers in column ${colIndex}, mapped to "pr_codenum"`);
+        break; // Only map the first column with part numbers
+      }
+    }
+  }
+  
+  console.log('Final headers:', newHeaders);
+  console.log('Assigned standard headers:', Array.from(assignedStandardHeaders));
+  
+  // Return processed data with new headers
+  return [newHeaders, ...processedData.slice(1)];
+};
+
+// Enhanced analyze document function
+export const analyzeDocument = async (
+  file: File,
+  documentType: string,
+): Promise<ProcessingResult> => {
+  try {
+    const endpoint = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_ENDPOINT;
+    const key = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_KEY;
+    const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
+    
+    const fileBuffer = await file.arrayBuffer();
+    const modelId = 'prebuilt-document';
+
+    console.log(`Processing document: ${file.name}`);
+
+    // Retry mechanism (keeping your existing retry logic)
+    const maxRetries = MAX_RETRIES;
+    const initialDelay = INITIAL_DELAY_MS;
+    let poller;
+    let result;
+    let lastError: any;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
+        result = await poller.pollUntilDone();
+        break;
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          let currentDelay = initialDelay * Math.pow(2, attempt);
+          
+          // Handle Azure rate limiting
+          if (error.statusCode === 429) {
+            if (typeof error.retryAfterInMs === 'number') {
+              currentDelay = error.retryAfterInMs;
+            } else {
+              const retryAfterHeader = error.response?.headers?.get('retry-after') || error.response?.headers?.['retry-after'];
+              if (retryAfterHeader) {
+                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+                if (!isNaN(retryAfterSeconds)) {
+                  currentDelay = retryAfterSeconds * 1000;
+                }
+              }
+            }
+          }
+          
+          currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
+          console.warn(`Attempt ${attempt + 1} failed, retrying in ${currentDelay}ms`);
+          await new Promise(resolve => setTimeout(resolve, currentDelay));
+        } else {
+          throw lastError;
+        }
+      }
+    }
+
+    if (result && result.tables?.length) {
+      console.log(`Found ${result.tables.length} tables in document`);
+      
+      // Process each table separately (like Python does)
+      const allItems: POItem[] = [];
+      
+      result.tables.forEach((table, tableIndex) => {
+        console.log(`Processing table ${tableIndex}:`);
+        
+        // Extract raw table data with proper handling of missing cells
+        const rawTableData = extractTableData(table);
+        
+        if (rawTableData.length === 0) {
+          console.warn(`Table ${tableIndex} is empty, skipping`);
+          return;
+        }
+        
+        // Process headers and data
+        const processedData = replaceImportHeaders(rawTableData);
+        
+        if (processedData.length < 2) {
+          console.warn(`Table ${tableIndex} has no data rows, skipping`);
+          return;
+        }
+        
+        // Convert to POItems
+        const headers = processedData[0];
+        const tableItems = processedData.slice(1).map((row, rowIndex) => {
+          const item: any = {};
+          
+          headers.forEach((header, colIndex) => {
+            const value = row[colIndex] || '';
+            
+            // Only convert to number if it looks like a number and isn't empty
+            if (value.toString().trim() !== '') {
+              const numValue = parseFloat(value.toString());
+              item[header] = isNaN(numValue) ? value : numValue;
+            } else {
+              item[header] = value; // Keep empty strings as-is
+            }
+          });
+          
+          return item;
+        });
+        
+        console.log(`Table ${tableIndex} produced ${tableItems.length} items`);
+        allItems.push(...tableItems);
+      });
+      
+      const poData: PurchaseOrderData = {
+        items: allItems,
+        poNumber: file.name.replace('.pdf', ''),
+        poDate: '',
+        vendor: '',
+        total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
+      };
+
+      console.log(`Total items processed: ${allItems.length}`);
+      return { success: true, data: poData };
+    }
+    
+    return { success: false, error: 'No table data found in document' };
+  } catch (error: any) {
+    console.error('Document processing error:', error);
+    return { success: false, error: error.message };
+  }
+};
 // Function to split PDF into pages
 export const splitPdf = async (file: File): Promise<File[]> => {
   const arrayBuffer = await file.arrayBuffer();
@@ -103,182 +430,57 @@ export const splitPdf = async (file: File): Promise<File[]> => {
   
   return splitPages;
 };
-
-
-// Function to analyze documents with Azure Form Recognizer
-export const analyzeDocument = async (
-  file: File,
-  documentType: string,
-): Promise<ProcessingResult> => {
-  try {
-    const endpoint = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_ENDPOINT;
-    const key = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_KEY;
-    const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
-    
-    const fileBuffer = await file.arrayBuffer();
-    const modelId = 'prebuilt-document';
-
-    // Retry mechanism configuration
-    const maxRetries = MAX_RETRIES;
-    const initialDelay = INITIAL_DELAY_MS; // in milliseconds
-
-    let poller;
-    let result;
-    let lastError: any;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
-        result = await poller.pollUntilDone();
-        break; // Success, exit loop
-      } catch (error: any) { // Ensure 'error' is typed as 'any' or a more specific error type if known
-        lastError = error;
-        if (attempt < maxRetries) {
-          let currentDelay = 0;
-          let isAzureSuggestedDelay = false;
-
-          // Check for Azure Form Recognizer specific error structure for rate limiting
-          // Typical Azure errors have a 'statusCode' property.
-          if (error.statusCode === 429) {
-            // 1. Check for error.retryAfterInMs (Azure SDK specific)
-            if (typeof error.retryAfterInMs === 'number') {
-              currentDelay = error.retryAfterInMs;
-              isAzureSuggestedDelay = true;
-            } else {
-              // 2. Check for Retry-After header (may need to inspect error.response.headers)
-              // This part is complex as direct header access depends on the SDK's error structure.
-              // For now, we'll simulate checking a common way it might be exposed.
-              // This might need adjustment based on actual error objects.
-              const retryAfterHeader = error.response?.headers?.get('retry-after') || error.response?.headers?.['retry-after'];
-              if (retryAfterHeader) {
-                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-                if (!isNaN(retryAfterSeconds)) {
-                  currentDelay = retryAfterSeconds * 1000;
-                  isAzureSuggestedDelay = true;
-                }
-              }
-            }
-
-            // 3. Parse error message if no other delay was found yet
-            if (!isAzureSuggestedDelay && error.message) {
-              const messageMatch = error.message.match(/retry after (\d+) seconds/i);
-              if (messageMatch && messageMatch[1]) {
-                const retryAfterSeconds = parseInt(messageMatch[1], 10);
-                if (!isNaN(retryAfterSeconds)) {
-                  currentDelay = retryAfterSeconds * 1000;
-                  isAzureSuggestedDelay = true;
-                }
-              }
-            }
-          }
-
-          // If no Azure suggested delay, or not a 429 error, use exponential backoff
-          if (!isAzureSuggestedDelay) {
-            currentDelay = initialDelay * Math.pow(2, attempt);
-          }
-
-          currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
-
-          let delaySourceMessage = isAzureSuggestedDelay ? "Azure-suggested delay" : "exponential backoff";
-          console.warn(
-            `Attempt ${attempt + 1} of ${maxRetries + 1} failed for document "${file.name}". ` +
-            `Error: ${error.message}. ` +
-            `Retrying in ${currentDelay}ms (using ${delaySourceMessage}).`
-          );
-          await new Promise(resolve => setTimeout(resolve, currentDelay));
-        } else {
-          console.error(
-            `All ${maxRetries + 1} attempts to process document "${file.name}" failed. Last error:`,
-            lastError // lastError should contain the full error object
-          );
-          throw lastError; // Re-throw the last error after all retries
-        }
-      }
-    }
-
-    if (result && result.tables?.length) {
-      // Process each table like in Python
-      const processedTables = result.tables.map(table => {
-        // Extract raw table data
-        const tableData = extractTableData(table);
-        // Process headers and data
-        const processedData = replaceImportHeaders(tableData);
-        
-        // Convert to POItems
-        const headers = processedData[0];
-        const items = processedData.slice(1).map(row => {
-          const item: any = {};
-          
-          headers.forEach((header, index) => {
-            const value = row[index];
-            // Try to convert to number if possible, otherwise keep as string
-            item[header] = isNaN(parseFloat(value)) ? value : parseFloat(value);
-          });
-          
-          return item;
-        });
-        
-        return items;
-      });
-      
-      // Combine all tables' items
-      const items = processedTables.flat();
-      
-      const poData: PurchaseOrderData = {
-        items,
-        poNumber: '',
-        poDate: '',
-        vendor: '',
-        total: items.reduce((sum, item) => sum + (item.total || 0), 0)
-      };
-
-      return { success: true, data: poData };
-    }
-    
-    return { success: false, error: 'No table data found in document' };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-};
-
-// Function to generate Excel output - simplified for line items only
+// Function to generate Excel output - PRESERVES ALL DATA
 export const generateExcelOutput = async (
   data: PurchaseOrderData,
   documentType: string,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {
-  // Sanitize items data for Excel generation
-  const sanitizedItems = data.items.map(item => {
-    const sanitizedItem: POItem = {}; // Create a new object based on POItem structure
-
-    // Iterate over keys of a POItem, which are known
-    // (description, pu_quant, pu_price, total, pr_codenum)
-    // Or iterate over keys of the item itself if dynamic keys are possible,
-    // but POItem structure is fixed.
-
-    (Object.keys(item) as Array<keyof POItem>).forEach(key => {
-      const value = item[key];
+  console.log(`Generating Excel for ${data.items.length} items`);
+  
+  // Sanitize items data for Excel generation - PRESERVE ALL COLUMNS
+  const sanitizedItems = data.items.map((item, index) => {
+    const sanitizedItem: Record<string, any> = {}; // Use Record to allow any keys
+    
+    // Iterate over ALL keys in the actual item, not just POItem keys
+    Object.keys(item).forEach(key => {
+      const value = item[key as keyof typeof item];
+      
       if (typeof value === 'string' && value.trim() === '') {
         // If string is empty or only whitespace, set to null for Excel
-        (sanitizedItem as any)[key] = null;
+        sanitizedItem[key] = null;
+      } else if (value === undefined || value === null) {
+        // Handle undefined/null values
+        sanitizedItem[key] = null;
       } else {
         // Otherwise, keep the original value
-        (sanitizedItem as any)[key] = value;
+        sanitizedItem[key] = value;
       }
     });
-
-    // Ensure all potential POItem keys are present if you want to maintain a consistent shape,
-    // even if they were undefined in the original item.
-    // However, XLSX.utils.json_to_sheet handles missing keys by not creating columns for them
-    // or creating empty cells if headers are explicitly provided.
-    // The current approach of only copying existing keys is fine.
-    // If a key was undefined in original item, it remains undefined in sanitizedItem,
-    // which XLSX handles as an empty cell.
-
+    
+    // Log the first few items to help debug
+    if (index < 3) {
+      console.log(`Item ${index} columns:`, Object.keys(sanitizedItem));
+      console.log(`Item ${index} sample data:`, sanitizedItem);
+    }
+    
     return sanitizedItem;
   });
-
+  
+  // Log total unique columns across all items
+  const allColumns = new Set<string>();
+  sanitizedItems.forEach(item => {
+    Object.keys(item).forEach(key => allColumns.add(key));
+  });
+  console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns).sort());
+  
+  // Check for our standard columns
+  const standardColumns = ['pu_quant', 'pu_price', 'pr_codenum', 'total'];
+  const foundStandardColumns = standardColumns.filter(col => allColumns.has(col));
+  console.log(`Found standard columns: ${foundStandardColumns.join(', ')}`);
+  
   const wb = XLSX.utils.book_new();
+  
   // Use sanitizedItems for generating the worksheet
   const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
   
@@ -287,8 +489,12 @@ export const generateExcelOutput = async (
   XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
   
   const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const blob = new Blob([excelBuffer], { 
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+  });
   
   const url = URL.createObjectURL(blob);
+  
+  console.log(`Excel file created: ${excelFileName} with columns: ${Array.from(allColumns).sort().join(', ')}`);
   return { url, fileName: excelFileName };
 };
