@@ -161,15 +161,21 @@ const replaceImportHeaders = (tableData: string[][]): string[][] => {
   console.log('Original headers:', headers);
   
   // Check if we should process headers at all
-  const targetWords = ["order", "items", "quantity", "qty", "cost", "unit price", "price", "#", "amount", "total"];
+  const targetWords = ["order", "items", "quantity", "qty", "cost", "unit price", "price", "#", "amount", "total", "unit", "each", "ea"];
   const hasTargetWords = headers.some(h => 
     targetWords.some(target => h.includes(target))
   );
   
-  if (!hasTargetWords) {
-    console.log('No target words found in headers, skipping header replacement');
-    return processedData;
+  // Additional check: detect if first row looks like data instead of headers
+  const firstRowLooksLikeData = detectDataRow(processedData[0]);
+  
+  if (!hasTargetWords || firstRowLooksLikeData) {
+    console.log('No target words found in headers OR first row appears to be data - treating as headerless table');
+    return handleHeaderlessTable(processedData);
   }
+
+  // If we get here, we have proper headers - continue with normal processing
+  console.log('Processing table with proper headers');
   
   // Track which standardized headers we've already assigned
   const assignedStandardHeaders = new Set<string>();
