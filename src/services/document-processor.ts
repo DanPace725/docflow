@@ -23,7 +23,7 @@ export interface POItem {
   pr_codenum?: string;  
   
   // Allow any additional fields from the original table
-  [key: string]: any;
+  [key: string]: any;}
 
 export interface ProcessingResult {
   success: boolean;
