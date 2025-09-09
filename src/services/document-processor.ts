@@ -28,6 +28,94 @@ export interface ProcessingResult {
   error?: string;
 }
 
+// Helper function to detect if a row looks like data instead of headers
+const detectDataRow = (row: string[]): boolean => {
+  // Patterns that suggest this is data, not headers
+  const dataPatterns = [
+    /P\d{2}-\d{3}-\d{3}/, // Part number pattern
+    /^\d+$/, // Pure numbers (quantities)
+    /\$\d+\.\d{2}/, // Dollar amounts
+    /\d+\.\d+/, // Decimal numbers
+    /^\d+\s+P\d{2}/, // Quantity followed by part number
+  ];
+  
+  // Count how many cells look like data
+  const dataMatches = row.filter(cell => 
+    dataPatterns.some(pattern => pattern.test(cell?.toString() || ''))
+  ).length;
+  
+  // If more than half the cells look like data, treat as data row
+  const threshold = Math.max(1, Math.floor(row.length / 2));
+  return dataMatches >= threshold;
+};
+
+// Helper function to handle tables without proper headers
+const handleHeaderlessTable = (tableData: string[][]): string[][] => {
+  console.log('Processing headerless table');
+  
+  if (tableData.length === 0) return tableData;
+  
+  // Analyze the structure to create intelligent headers
+  const numColumns = Math.max(...tableData.map(row => row.length));
+  const headers: string[] = [];
+  
+  // For each column, analyze the data to guess what it might be
+  for (let colIndex = 0; colIndex < numColumns; colIndex++) {
+    const columnValues = tableData.map(row => row[colIndex] || '').filter(v => v.trim() !== '');
+    
+    if (columnValues.length === 0) {
+      headers[colIndex] = `Column_${colIndex + 1}`;
+      continue;
+    }
+    
+    // Check for patterns in this column
+    const hasPartNumbers = columnValues.some(v => /P\d{2}-\d{3}-\d{3}/.test(v));
+    const hasMoneyFirst = columnValues.some(v => /^\$\d+\.\d{2}$/.test(v)); // Unit prices
+    const hasMoneyLast = columnValues.some(v => /^\$\d+\.\d{2}$/.test(v)); // Could be totals
+    const hasQuantities = columnValues.some(v => /^\d+$/.test(v));
+    const hasDimensions = columnValues.some(v => /\d+[\-\/]\d+/.test(v) || /\d+\s*X\s*\d+/.test(v));
+    const hasUnits = columnValues.some(v => /^(EA|EACH|PC|PCS)$/i.test(v));
+    
+    // Assign intelligent column names based on patterns
+    if (hasPartNumbers) {
+      headers[colIndex] = 'pr_codenum';
+    } else if (hasQuantities && colIndex === 0) {
+      headers[colIndex] = 'pu_quant'; // First column with numbers is usually quantity
+    } else if (hasMoneyFirst && colIndex < numColumns - 2) {
+      headers[colIndex] = 'pu_price'; // Money in early columns is usually unit price
+    } else if (hasMoneyLast && colIndex === numColumns - 1) {
+      headers[colIndex] = 'total'; // Last money column is usually total
+    } else if (hasUnits) {
+      headers[colIndex] = 'unit';
+    } else if (hasDimensions) {
+      headers[colIndex] = 'description';
+    } else {
+      // Generic column name
+      headers[colIndex] = `Column_${colIndex + 1}`;
+    }
+  }
+  
+  // Look for duplicate standard headers and rename
+  const standardHeaders = ['pu_quant', 'pu_price', 'total', 'pr_codenum'];
+  const usedStandardHeaders = new Set<string>();
+  
+  headers.forEach((header, index) => {
+    if (standardHeaders.includes(header)) {
+      if (usedStandardHeaders.has(header)) {
+        // Duplicate standard header, make it generic
+        headers[index] = `${header}_${index + 1}`;
+      } else {
+        usedStandardHeaders.add(header);
+      }
+    }
+  });
+  
+  console.log('Generated headers for headerless table:', headers);
+  
+  // Return data with generated headers
+  return [headers, ...tableData];
+};
+
 // Enhanced table extraction that handles missing/irregular cells
 const extractTableData = (table: any) => {
   if (!table.cells || table.cells.length === 0) {
