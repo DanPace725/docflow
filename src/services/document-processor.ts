@@ -305,7 +305,34 @@ export const analyzeDocument = async (
     return { success: false, error: error.message };
   }
 };
-
+// Function to split PDF into pages
+export const splitPdf = async (file: File): Promise<File[]> => {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdfDoc = await PDFDocument.load(arrayBuffer);
+  const pageCount = pdfDoc.getPageCount();
+  
+  // Get base name without .pdf extension
+  const baseName = file.name.replace('.pdf', '');
+  const splitPages: File[] = [];
+  
+  for (let i = 0; i < pageCount; i++) {
+    const newPdf = await PDFDocument.create();
+    const [copiedPage] = await newPdf.copyPages(pdfDoc, [i]);
+    newPdf.addPage(copiedPage);
+    
+    const pdfBytes = await newPdf.save();
+    // Create sequential filename: 0507_1.pdf, 0507_2.pdf, etc.
+    const pageFile = new File(
+      [pdfBytes], 
+      `${baseName}_${i + 1}.pdf`,
+      { type: 'application/pdf' }
+    );
+    
+    splitPages.push(pageFile);
+  }
+  
+  return splitPages;
+};
 // Function to generate Excel output - PRESERVES ALL DATA
 export const generateExcelOutput = async (
   data: PurchaseOrderData,
