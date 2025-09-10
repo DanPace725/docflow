@@ -29,6 +29,7 @@ export interface ProcessingResult {
   success: boolean;
   data?: PurchaseOrderData;
   error?: string;
+  statusCode?: number;
 }
 
 // Helper function to detect if a row looks like data instead of headers
@@ -183,7 +184,7 @@ const replaceImportHeaders = (tableData: string[][]): string[][] => {
   
   // Handle "amount" column special positioning logic FIRST
   const amountIndices = headers
-    .map((h, i) => h === 'amount' ? i : -1)
+    .map((h, i) => h.includes('amount') ? i : -1)
     .filter(i => i !== -1);
     
   amountIndices.forEach(index => {
@@ -399,7 +400,7 @@ export const analyzeDocument = async (
     return { success: false, error: 'No table data found in document' };
   } catch (error: any) {
     console.error('Document processing error:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, statusCode: error.statusCode };
   }
 };
 // Function to split PDF into pages

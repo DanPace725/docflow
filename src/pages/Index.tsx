@@ -55,8 +55,16 @@ const Index: React.FC = () => {
         // Split PDF into pages if needed
         const pages = await splitPdf(file);
         
-        // Process each page
+        // Process each page with a dynamic delay
+        let interRequestDelay = 1000; // Start with a 1-second delay
+
         for (let j = 0; j < pages.length; j++) {
+          // Don't wait before the very first request
+          if (i > 0 || j > 0) {
+            setStatusMessage(`Waiting ${interRequestDelay}ms to avoid rate limit...`);
+            await new Promise(resolve => setTimeout(resolve, interRequestDelay));
+          }
+
           const page = pages[j];
           setStatusMessage(`Analyzing page ${j + 1} of ${pages.length} from file ${i + 1}`);
           
@@ -77,7 +85,12 @@ const Index: React.FC = () => {
             const errorMessage = `Failed to process page: ${page.name}. Error: ${result.error || 'No data found'}`;
             toast.error(errorMessage);
             overallErrorMessage += `${errorMessage}\n`;
-            // Continue to the next page/file without throwing an error that stops the batch
+
+            // If we hit a rate limit, increase the delay for subsequent requests
+            if (result.statusCode === 429) {
+              interRequestDelay = Math.min(interRequestDelay * 2, 30000); // Double delay up to 30s
+              toast.warning(`Rate limit hit. Increasing delay to ${interRequestDelay}ms.`);
+            }
           }
         }
       }
