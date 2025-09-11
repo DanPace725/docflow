@@ -41,84 +41,118 @@ const Index: React.FC = () => {
     setStatus('processing');
     setStatusMessage('Preparing files for processing...');
     setProgress(10);
-    let pagesWithErrors = 0;
+
     let overallErrorMessage = "";
+    const failedPages: File[] = [];
 
     try {
-      // Process each file
+      let totalPages = 0;
+      let processedPages = 0;
+
+      // First, get a total count of all pages to be processed
+      for (const file of files) {
+        const pages = await splitPdf(file);
+        totalPages += pages.length;
+      }
+
+      // Main processing loop
+      let interRequestDelay = 1000; // Start with a 1s delay
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        
         setStatusMessage(`Processing file ${i + 1} of ${files.length}: ${file.name}`);
-        setProgress(Math.round((i / files.length) * 70) + 10);
         
-        // Split PDF into pages if needed
         const pages = await splitPdf(file);
-        
-        // Process each page with a dynamic delay
-        let interRequestDelay = 1000; // Start with a 1-second delay
 
-        for (let j = 0; j < pages.length; j++) {
+        for (const page of pages) {
+          processedPages++;
+          setProgress(Math.round((processedPages / totalPages) * 80) + 10);
+
           // Don't wait before the very first request
-          if (i > 0 || j > 0) {
-            setStatusMessage(`Waiting ${interRequestDelay}ms to avoid rate limit...`);
+          if (processedPages > 1) {
+            setStatusMessage(`Waiting ${interRequestDelay}ms...`);
             await new Promise(resolve => setTimeout(resolve, interRequestDelay));
           }
 
-          const page = pages[j];
-          setStatusMessage(`Analyzing page ${j + 1} of ${pages.length} from file ${i + 1}`);
+          setStatusMessage(`Analyzing page ${page.name} (${processedPages}/${totalPages})`);
           
-          // Analyze the document
           const result = await analyzeDocument(page, documentType);
           
           if (result.success && result.data) {
             const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
             setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-            
-            // Create and click link for download
             const link = document.createElement('a');
             link.href = url;
             link.download = excelFileName;
             link.click();
           } else {
-            pagesWithErrors++;
-            const errorMessage = `Failed to process page: ${page.name}. Error: ${result.error || 'No data found'}`;
+            const errorMessage = `Initial processing failed for page: ${page.name}. Error: ${result.error || 'Unknown'}`;
             toast.error(errorMessage);
             overallErrorMessage += `${errorMessage}\n`;
+            failedPages.push(page); // Add to retry queue
 
-            // If we hit a rate limit, increase the delay for subsequent requests
             if (result.statusCode === 429) {
-              interRequestDelay = Math.min(interRequestDelay * 2, 30000); // Double delay up to 30s
-              toast.warning(`Rate limit hit. Increasing delay to ${interRequestDelay}ms.`);
+              interRequestDelay = Math.min(interRequestDelay * 2, 30000);
+              toast.warning(`Rate limit hit. Delay increased to ${interRequestDelay}ms.`);
             }
+          }
+        }
+      }
+
+      // Retry loop for failed pages
+      let finalErrorCount = 0;
+      if (failedPages.length > 0) {
+        setStatusMessage(`Retrying ${failedPages.length} failed page(s)...`);
+        setProgress(90);
+
+        const retryDelay = 5000; // Use a generous static delay for retries
+
+        for (const page of failedPages) {
+          setStatusMessage(`Waiting ${retryDelay}ms before retrying ${page.name}...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+
+          setStatusMessage(`Retrying page: ${page.name}`);
+          const result = await analyzeDocument(page, documentType);
+
+          if (result.success && result.data) {
+            toast.success(`Successfully processed ${page.name} on retry.`);
+            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
+            setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = excelFileName;
+            link.click();
+          } else {
+            finalErrorCount++;
+            const finalErrorMessage = `Permanent failure for page: ${page.name}. Error: ${result.error || 'Unknown'}`;
+            toast.error(finalErrorMessage, { duration: 10000 });
+            overallErrorMessage += `${finalErrorMessage}\n`;
           }
         }
       }
       
       setProgress(100);
-      if (pagesWithErrors > 0) {
+      if (finalErrorCount > 0) {
         setStatus('error');
-        const finalMessage = `Processed ${files.length} file(s) with ${pagesWithErrors} page(s) having errors.`;
+        const finalMessage = `Processing complete. ${files.length} file(s) processed with ${finalErrorCount} permanent error(s).`;
         setStatusMessage(finalMessage);
-        toast.error("Processing completed with errors", {
-          description: `${finalMessage}\nDetails:\n${overallErrorMessage}`,
+        toast.error("Processing completed with permanent errors", {
+          description: `Details:\n${overallErrorMessage}`,
+          duration: 15000
         });
       } else {
         setStatus('success');
-        setStatusMessage(`Successfully processed ${files.length} file(s)`);
+        setStatusMessage(`Successfully processed all pages from ${files.length} file(s).`);
         toast.success("Processing complete", {
-          description: `Successfully processed ${files.length} files`,
+          description: `All pages from ${files.length} file(s) were processed successfully.`,
         });
       }
       
     } catch (error) {
-      // This catch block will now primarily handle unexpected errors, 
-      // rather than errors from analyzeDocument which are handled above.
       setStatus('error');
-      const unexpectedErrorMessage = `Unexpected error during processing: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      const unexpectedErrorMessage = `An unexpected error stopped the process: ${error instanceof Error ? error.message : 'Unknown error'}`;
       setStatusMessage(unexpectedErrorMessage);
-      toast.error("Processing error", {
-        description: error instanceof Error ? error.message : 'An unexpected error occurred',
+      toast.error("Critical Processing Error", {
+        description: unexpectedErrorMessage,
       });
     }
   };
