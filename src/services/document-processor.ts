@@ -285,123 +285,96 @@ export const analyzeDocument = async (
   file: File,
   documentType: string,
 ): Promise<ProcessingResult> => {
-  try {
-    const endpoint = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_ENDPOINT;
-    const key = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_KEY;
-    const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
-    
-    const fileBuffer = await file.arrayBuffer();
-    const modelId = 'prebuilt-document';
+  const endpoint = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_ENDPOINT;
+  const key = import.meta.env.VITE_AZURE_FORM_RECOGNIZER_KEY;
+  const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
 
-    console.log(`Processing document: ${file.name}`);
+  const fileBuffer = await file.arrayBuffer();
+  const modelId = 'prebuilt-document';
 
-    // Retry mechanism (keeping your existing retry logic)
-    const maxRetries = MAX_RETRIES;
-    const initialDelay = INITIAL_DELAY_MS;
-    let poller;
-    let result;
-    let lastError: any;
+  console.log(`Processing document: ${file.name}`);
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
-        result = await poller.pollUntilDone();
-        break;
-      } catch (error: any) {
-        lastError = error;
-        if (attempt < maxRetries) {
-          let currentDelay = initialDelay * Math.pow(2, attempt);
+  // Retry mechanism
+  const maxRetries = MAX_RETRIES;
+  const initialDelay = INITIAL_DELAY_MS;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
+      const result = await poller.pollUntilDone();
+
+      if (result && result.tables?.length) {
+        console.log(`Found ${result.tables.length} tables in document`);
+        
+        const allItems: POItem[] = [];
+        
+        result.tables.forEach((table, tableIndex) => {
+          console.log(`Processing table ${tableIndex}:`);
+          const rawTableData = extractTableData(table);
+          if (rawTableData.length === 0) return;
           
-          // Handle Azure rate limiting
-          if (error.statusCode === 429) {
-            if (typeof error.retryAfterInMs === 'number') {
-              currentDelay = error.retryAfterInMs;
-            } else {
-              const retryAfterHeader = error.response?.headers?.get('retry-after') || error.response?.headers?.['retry-after'];
-              if (retryAfterHeader) {
-                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-                if (!isNaN(retryAfterSeconds)) {
-                  currentDelay = retryAfterSeconds * 1000;
-                }
+          const processedData = replaceImportHeaders(rawTableData);
+          if (processedData.length < 2) return;
+
+          const headers = processedData[0];
+          const tableItems = processedData.slice(1).map((row) => {
+            const item: any = {};
+            headers.forEach((header, colIndex) => {
+              const value = row[colIndex] || '';
+              if (value.toString().trim() !== '') {
+                const numValue = parseFloat(value.toString());
+                item[header] = isNaN(numValue) ? value : numValue;
+              } else {
+                item[header] = value;
               }
-            }
-          }
-          
-          currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
-          console.warn(`Attempt ${attempt + 1} failed, retrying in ${currentDelay}ms`);
-          await new Promise(resolve => setTimeout(resolve, currentDelay));
-        } else {
-          throw lastError;
-        }
-      }
-    }
-
-    if (result && result.tables?.length) {
-      console.log(`Found ${result.tables.length} tables in document`);
-      
-      // Process each table separately (like Python does)
-      const allItems: POItem[] = [];
-      
-      result.tables.forEach((table, tableIndex) => {
-        console.log(`Processing table ${tableIndex}:`);
-        
-        // Extract raw table data with proper handling of missing cells
-        const rawTableData = extractTableData(table);
-        
-        if (rawTableData.length === 0) {
-          console.warn(`Table ${tableIndex} is empty, skipping`);
-          return;
-        }
-        
-        // Process headers and data
-        const processedData = replaceImportHeaders(rawTableData);
-        
-        if (processedData.length < 2) {
-          console.warn(`Table ${tableIndex} has no data rows, skipping`);
-          return;
-        }
-        
-        // Convert to POItems
-        const headers = processedData[0];
-        const tableItems = processedData.slice(1).map((row, rowIndex) => {
-          const item: any = {};
-          
-          headers.forEach((header, colIndex) => {
-            const value = row[colIndex] || '';
-            
-            // Only convert to number if it looks like a number and isn't empty
-            if (value.toString().trim() !== '') {
-              const numValue = parseFloat(value.toString());
-              item[header] = isNaN(numValue) ? value : numValue;
-            } else {
-              item[header] = value; // Keep empty strings as-is
-            }
+            });
+            return item;
           });
-          
-          return item;
+          allItems.push(...tableItems);
         });
         
-        console.log(`Table ${tableIndex} produced ${tableItems.length} items`);
-        allItems.push(...tableItems);
-      });
-      
-      const poData: PurchaseOrderData = {
-        items: allItems,
-        poNumber: file.name.replace('.pdf', ''),
-        poDate: '',
-        vendor: '',
-        total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
-      };
+        const poData: PurchaseOrderData = {
+          items: allItems,
+          poNumber: file.name.replace('.pdf', ''),
+          poDate: '',
+          vendor: '',
+          total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
+        };
 
-      console.log(`Total items processed: ${allItems.length}`);
-      return { success: true, data: poData };
+        console.log(`Total items processed: ${allItems.length}`);
+        return { success: true, data: poData };
+      }
+      
+      return { success: false, error: 'No table data found in document' };
+
+    } catch (error: any) {
+      console.error(`Attempt ${attempt + 1} for ${file.name} failed. Error: ${error.message}`);
+
+      if (attempt < maxRetries) {
+        let currentDelay = initialDelay * Math.pow(2, attempt);
+
+        if (error.statusCode === 429) {
+          const retryAfterHeader = error.response?.headers?.get('retry-after');
+          if (retryAfterHeader) {
+            const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+            if (!isNaN(retryAfterSeconds)) {
+              currentDelay = retryAfterSeconds * 1000;
+            }
+          }
+        }
+
+        currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
+        console.warn(`Retrying in ${currentDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+      } else {
+        console.error(`All retries failed for ${file.name}.`);
+        // On final failure, return the error details directly
+        return { success: false, error: error.message, statusCode: error.statusCode };
+      }
     }
-    
-    return { success: false, error: 'No table data found in document' };
-  } catch (error: any) {
-    console.error('Document processing error:', error);
-    return { success: false, error: error.message, statusCode: error.statusCode };
   }
+  // This part should be unreachable if the loop logic is correct, but it satisfies TypeScript
+  return { success: false, error: 'Exited analysis loop unexpectedly.' };
 };
 // Function to split PDF into pages
 export const splitPdf = async (file: File): Promise<File[]> => {
