@@ -27,9 +27,38 @@ export interface POItem {
 
 export interface ProcessingResult {
   success: boolean;
-  data?: PurchaseOrderData;
+  data?: PurchaseOrderData | InvoiceData; // Can be either type
   error?: string;
   statusCode?: number;
+}
+
+// Interface for processed Invoice data
+export interface InvoiceData {
+  documentType: 'invoice';
+  fields: {
+    InvoiceId?: string;
+    InvoiceDate?: string;
+    DueDate?: string;
+    VendorName?: string;
+    VendorAddress?: string;
+    CustomerName?: string;
+    CustomerAddress?: string;
+    InvoiceTotal?: number;
+    SubTotal?: number;
+    TotalTax?: number;
+  };
+  items: InvoiceItem[];
+}
+
+export interface InvoiceItem {
+  Amount?: number;
+  Description?: string;
+  ProductCode?: string;
+  Quantity?: number;
+  Unit?: string;
+  UnitPrice?: number;
+  Tax?: number;
+  [key: string]: any; // Allow other fields
 }
 
 // Helper function to detect if a row looks like data instead of headers
@@ -280,6 +309,84 @@ const replaceImportHeaders = (tableData: string[][]): string[][] => {
   return [newHeaders, ...processedData.slice(1)];
 };
 
+// Extracts and transforms data from the 'prebuilt-invoice' model result
+const extractInvoiceData = (result: any): InvoiceData | null => {
+  const document = result.documents?.[0];
+  if (!document) {
+    console.error("No document found in invoice analysis result");
+    return null;
+  }
+
+  const fields = document.fields;
+
+  // Helper to get value from a field, especially for currency
+  const getFieldValue = (fieldName: string, type: 'string' | 'number' | 'date' = 'string') => {
+    const field = fields[fieldName];
+    if (!field) return undefined;
+
+    // Check for value property first
+    if (field.value) {
+        if (type === 'number') {
+            return typeof field.value === 'number' ? field.value : field.value.amount;
+        }
+        if (type === 'date') {
+            return field.value.toString();
+        }
+        return field.value;
+    }
+
+    // Fallback to content if value is not present
+    return field.content;
+  };
+
+  const invoiceData: InvoiceData = {
+    documentType: 'invoice',
+    fields: {
+      InvoiceId: getFieldValue('InvoiceId'),
+      InvoiceDate: getFieldValue('InvoiceDate', 'date'),
+      DueDate: getFieldValue('DueDate', 'date'),
+      VendorName: getFieldValue('VendorName'),
+      VendorAddress: getFieldValue('VendorAddress'),
+      CustomerName: getFieldValue('CustomerName'),
+      CustomerAddress: getFieldValue('CustomerAddress'),
+      InvoiceTotal: getFieldValue('InvoiceTotal', 'number'),
+      SubTotal: getFieldValue('SubTotal', 'number'),
+      TotalTax: getFieldValue('TotalTax', 'number'),
+    },
+    items: [],
+  };
+
+  const itemsField = fields['Items'];
+  if (itemsField && itemsField.kind === 'list') {
+    invoiceData.items = itemsField.value.map((item: any) => {
+      const itemFields = item.value;
+      const getLineItemValue = (fieldName: string, type: 'string' | 'number' = 'string') => {
+          const field = itemFields[fieldName];
+          if (!field) return undefined;
+
+          if (type === 'number') {
+              if (field.value?.amount) return field.value.amount;
+              return typeof field.value === 'number' ? field.value : undefined;
+          }
+          return field.content;
+      };
+
+      const lineItem: InvoiceItem = {
+        Description: getLineItemValue('Description'),
+        Quantity: getLineItemValue('Quantity', 'number'),
+        ProductCode: getLineItemValue('ProductCode'),
+        Unit: getLineItemValue('Unit'),
+        UnitPrice: getLineItemValue('UnitPrice', 'number'),
+        Tax: getLineItemValue('Tax', 'number'),
+        Amount: getLineItemValue('Amount', 'number'),
+      };
+      return lineItem;
+    });
+  }
+
+  return invoiceData;
+};
+
 // Enhanced analyze document function
 export const analyzeDocument = async (
   file: File,
@@ -290,68 +397,81 @@ export const analyzeDocument = async (
   const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
 
   const fileBuffer = await file.arrayBuffer();
-  const modelId = 'prebuilt-document';
 
-  console.log(`Processing document: ${file.name}`);
+  // Determine the model ID based on document type
+  const modelId = documentType === 'invoice' ? 'prebuilt-invoice' : 'prebuilt-document';
+
+  console.log(`Processing document: ${file.name} with model: ${modelId}`);
 
   // Retry mechanism
-  const maxRetries = MAX_RETRIES;
-  const initialDelay = INITIAL_DELAY_MS;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
       const result = await poller.pollUntilDone();
 
-      if (result && result.tables?.length) {
-        console.log(`Found ${result.tables.length} tables in document`);
-        
-        const allItems: POItem[] = [];
-        
-        result.tables.forEach((table, tableIndex) => {
-          console.log(`Processing table ${tableIndex}:`);
-          const rawTableData = extractTableData(table);
-          if (rawTableData.length === 0) return;
+      if (documentType === 'invoice') {
+        if (result && result.documents?.length > 0) {
+          const invoiceData = extractInvoiceData(result);
+          if (invoiceData) {
+            console.log(`Successfully extracted invoice data for ${file.name}`);
+            return { success: true, data: invoiceData };
+          } else {
+            return { success: false, error: 'Failed to extract structured invoice data.' };
+          }
+        } else {
+          return { success: false, error: 'No documents found in invoice analysis result.' };
+        }
+      } else { // Handle purchase orders and other document types
+        if (result && result.tables?.length) {
+          console.log(`Found ${result.tables.length} tables in document`);
+
+          const allItems: POItem[] = [];
           
-          const processedData = replaceImportHeaders(rawTableData);
-          if (processedData.length < 2) return;
+          result.tables.forEach((table, tableIndex) => {
+            console.log(`Processing table ${tableIndex}:`);
+            const rawTableData = extractTableData(table);
+            if (rawTableData.length === 0) return;
 
-          const headers = processedData[0];
-          const tableItems = processedData.slice(1).map((row) => {
-            const item: any = {};
-            headers.forEach((header, colIndex) => {
-              const value = row[colIndex] || '';
-              if (value.toString().trim() !== '') {
-                const numValue = parseFloat(value.toString());
-                item[header] = isNaN(numValue) ? value : numValue;
-              } else {
-                item[header] = value;
-              }
+            const processedData = replaceImportHeaders(rawTableData);
+            if (processedData.length < 2) return;
+
+            const headers = processedData[0];
+            const tableItems = processedData.slice(1).map((row) => {
+              const item: any = {};
+              headers.forEach((header, colIndex) => {
+                const value = row[colIndex] || '';
+                if (value.toString().trim() !== '') {
+                  const numValue = parseFloat(value.toString());
+                  item[header] = isNaN(numValue) ? value : numValue;
+                } else {
+                  item[header] = value;
+                }
+              });
+              return item;
             });
-            return item;
+            allItems.push(...tableItems);
           });
-          allItems.push(...tableItems);
-        });
-        
-        const poData: PurchaseOrderData = {
-          items: allItems,
-          poNumber: file.name.replace('.pdf', ''),
-          poDate: '',
-          vendor: '',
-          total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
-        };
 
-        console.log(`Total items processed: ${allItems.length}`);
-        return { success: true, data: poData };
+          const poData: PurchaseOrderData = {
+            items: allItems,
+            poNumber: file.name.replace('.pdf', ''),
+            poDate: '',
+            vendor: '',
+            total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
+          };
+
+          console.log(`Total items processed: ${allItems.length}`);
+          return { success: true, data: poData };
+        }
+
+        return { success: false, error: 'No table data found in document' };
       }
-      
-      return { success: false, error: 'No table data found in document' };
 
     } catch (error: any) {
       console.error(`Attempt ${attempt + 1} for ${file.name} failed. Error: ${error.message}`);
 
-      if (attempt < maxRetries) {
-        let currentDelay = initialDelay * Math.pow(2, attempt);
+      if (attempt < MAX_RETRIES) {
+        let currentDelay = INITIAL_DELAY_MS * Math.pow(2, attempt);
 
         if (error.statusCode === 429) {
           const retryAfterHeader = error.response?.headers?.get('retry-after');
@@ -368,12 +488,10 @@ export const analyzeDocument = async (
         await new Promise(resolve => setTimeout(resolve, currentDelay));
       } else {
         console.error(`All retries failed for ${file.name}.`);
-        // On final failure, return the error details directly
         return { success: false, error: error.message, statusCode: error.statusCode };
       }
     }
   }
-  // This part should be unreachable if the loop logic is correct, but it satisfies TypeScript
   return { success: false, error: 'Exited analysis loop unexpectedly.' };
 };
 // Function to split PDF into pages
@@ -404,64 +522,48 @@ export const splitPdf = async (file: File): Promise<File[]> => {
   
   return splitPages;
 };
-// Function to generate Excel output - PRESERVES ALL DATA
+// Function to generate Excel output for both Invoices and Purchase Orders
 export const generateExcelOutput = async (
-  data: PurchaseOrderData,
-  documentType: string,
+  data: PurchaseOrderData | InvoiceData,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {
-  console.log(`Generating Excel for ${data.items.length} items`);
-  
-  // Sanitize items data for Excel generation - PRESERVE ALL COLUMNS
-  const sanitizedItems = data.items.map((item, index) => {
-    const sanitizedItem: Record<string, any> = {}; // Use Record to allow any keys
-    
-    // Iterate over ALL keys in the actual item, not just POItem keys
-    Object.keys(item).forEach(key => {
-      const value = item[key as keyof typeof item];
-      
-      if (typeof value === 'string' && value.trim() === '') {
-        // If string is empty or only whitespace, set to null for Excel
-        sanitizedItem[key] = null;
-      } else if (value === undefined || value === null) {
-        // Handle undefined/null values
-        sanitizedItem[key] = null;
-      } else {
-        // Otherwise, keep the original value
-        sanitizedItem[key] = value;
-      }
-    });
-    
-    // Log the first few items to help debug
-    if (index < 3) {
-      console.log(`Item ${index} columns:`, Object.keys(sanitizedItem));
-      console.log(`Item ${index} sample data:`, sanitizedItem);
-    }
-    
-    return sanitizedItem;
-  });
-  
-  // Log total unique columns across all items
-  const allColumns = new Set<string>();
-  sanitizedItems.forEach(item => {
-    Object.keys(item).forEach(key => allColumns.add(key));
-  });
-  console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns).sort());
-  
-  // Check for our standard columns
-  const standardColumns = ['pu_quant', 'pu_price', 'pr_codenum', 'total'];
-  const foundStandardColumns = standardColumns.filter(col => allColumns.has(col));
-  console.log(`Found standard columns: ${foundStandardColumns.join(', ')}`);
-  
   const wb = XLSX.utils.book_new();
-  
-  // Use sanitizedItems for generating the worksheet
-  const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
-  
   const excelFileName = fileName.replace('.pdf', '.xlsx');
+
+  // Type guard to check if data is InvoiceData
+  if ('documentType' in data && data.documentType === 'invoice') {
+    console.log(`Generating Excel for Invoice: ${Object.keys(data.fields).length} fields, ${data.items.length} items`);
+    
+    // Create 'Details' sheet for invoice fields
+    const detailsSheet = XLSX.utils.json_to_sheet([data.fields]);
+    XLSX.utils.book_append_sheet(wb, detailsSheet, 'Details');
+    
+    // Create 'Line Items' sheet
+    const itemsWs = XLSX.utils.json_to_sheet(data.items);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
+    
+  } else { // Assumes PurchaseOrderData, which lacks a 'documentType' field
+    const poData = data as PurchaseOrderData;
+    console.log(`Generating Excel for Purchase Order: ${poData.items.length} items`);
   
-  XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
-  
+    // Sanitize items data for Excel generation
+    const sanitizedItems = poData.items.map(item => {
+      const sanitizedItem: Record<string, any> = {};
+      Object.keys(item).forEach(key => {
+        const value = item[key as keyof typeof item];
+        sanitizedItem[key] = (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) ? null : value;
+      });
+      return sanitizedItem;
+    });
+
+    const allColumns = new Set<string>();
+    sanitizedItems.forEach(item => Object.keys(item).forEach(key => allColumns.add(key)));
+    console.log(`Total unique PO columns: ${allColumns.size}`, Array.from(allColumns).sort());
+
+    const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
+  }
+
   const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([excelBuffer], { 
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
@@ -469,6 +571,6 @@ export const generateExcelOutput = async (
   
   const url = URL.createObjectURL(blob);
   
-  console.log(`Excel file created: ${excelFileName} with columns: ${Array.from(allColumns).sort().join(', ')}`);
+  console.log(`Excel file created: ${excelFileName}`);
   return { url, fileName: excelFileName };
 };
