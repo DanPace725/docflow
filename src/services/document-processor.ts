@@ -143,7 +143,9 @@ const extractInvoiceData = (result: any): InvoiceData => {
       return undefined;
     }
 
-    switch (field.type) {
+    const fieldKind = field.kind ?? field.type;
+
+    switch (fieldKind) {
       case 'string':
       case 'date':
       case 'number':
@@ -162,7 +164,7 @@ const extractInvoiceData = (result: any): InvoiceData => {
         // If it's already an object (as it should be)
         return field.value?.amount;
       default:
-        return field.content || undefined;
+        return field.content ?? field.value ?? undefined;
     }
   };
 
@@ -180,9 +182,10 @@ const extractInvoiceData = (result: any): InvoiceData => {
   };
 
   const items: InvoiceItem[] = [];
-  if (fields.Items && Array.isArray(fields.Items.values)) {
-    for (const itemField of fields.Items.values) {
-      if (itemField.type === 'object' && itemField.properties) {
+  const itemFields = fields.Items?.values;
+  if (Array.isArray(itemFields)) {
+    for (const itemField of itemFields) {
+      if (itemField?.kind === 'object' && itemField.properties) {
         const props = itemField.properties;
         const item: InvoiceItem = {
           Description: getFieldValue(props.Description),
