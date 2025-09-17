@@ -319,39 +319,34 @@ const extractInvoiceData = (result: any): InvoiceData | null => {
 
   const fields = document.fields;
 
-  // Helper to get value from a field, especially for currency
-  const getFieldValue = (fieldName: string, type: 'string' | 'number' | 'date' = 'string') => {
+  // Helper to get value from a top-level field
+  const getFieldValue = (fieldName: string) => {
     const field = fields[fieldName];
     if (!field) return undefined;
 
-    // Check for value property first
     if (field.value) {
-        if (type === 'number') {
-            return typeof field.value === 'number' ? field.value : field.value.amount;
+        if (typeof field.value === 'object' && field.value !== null && 'amount' in field.value) {
+            return field.value.amount; // Currency
         }
-        if (type === 'date') {
-            return field.value.toString();
-        }
-        return field.value;
+        // For date, value is an object, so convert to string. For others, it's primitive.
+        return field.value.toString();
     }
-
-    // Fallback to content if value is not present
-    return field.content;
+    return field.content; // Fallback
   };
 
   const invoiceData: InvoiceData = {
     documentType: 'invoice',
     fields: {
       InvoiceId: getFieldValue('InvoiceId'),
-      InvoiceDate: getFieldValue('InvoiceDate', 'date'),
-      DueDate: getFieldValue('DueDate', 'date'),
+      InvoiceDate: getFieldValue('InvoiceDate'),
+      DueDate: getFieldValue('DueDate'),
       VendorName: getFieldValue('VendorName'),
       VendorAddress: getFieldValue('VendorAddress'),
       CustomerName: getFieldValue('CustomerName'),
       CustomerAddress: getFieldValue('CustomerAddress'),
-      InvoiceTotal: getFieldValue('InvoiceTotal', 'number'),
-      SubTotal: getFieldValue('SubTotal', 'number'),
-      TotalTax: getFieldValue('TotalTax', 'number'),
+      InvoiceTotal: getFieldValue('InvoiceTotal'),
+      SubTotal: getFieldValue('SubTotal'),
+      TotalTax: getFieldValue('TotalTax'),
     },
     items: [],
   };
@@ -359,31 +354,44 @@ const extractInvoiceData = (result: any): InvoiceData | null => {
   const itemsField = fields['Items'];
   if (itemsField && itemsField.kind === 'list') {
     invoiceData.items = itemsField.value.map((item: any) => {
-      const itemFields = item.value;
-      const getLineItemValue = (fieldName: string, type: 'string' | 'number' = 'string') => {
+      const itemFields = item.value; // item.value is the object with line item fields
+
+      // More robust helper for line item fields
+      const getLineItemValue = (fieldName: string) => {
           const field = itemFields[fieldName];
           if (!field) return undefined;
 
-          if (type === 'number') {
-              if (field.value?.amount) return field.value.amount;
-              return typeof field.value === 'number' ? field.value : undefined;
+          // Prefer the normalized 'value' property
+          if (field.value) {
+              // Handle currency objects
+              if (typeof field.value === 'object' && field.value !== null && 'amount' in field.value) {
+                  return field.value.amount;
+              }
+              // Handle other value types (string, number, date)
+              return field.value;
           }
+
+          // Fallback to raw 'content' if 'value' is not present
           return field.content;
       };
 
       const lineItem: InvoiceItem = {
         Description: getLineItemValue('Description'),
-        Quantity: getLineItemValue('Quantity', 'number'),
+        Quantity: getLineItemValue('Quantity'),
         ProductCode: getLineItemValue('ProductCode'),
         Unit: getLineItemValue('Unit'),
-        UnitPrice: getLineItemValue('UnitPrice', 'number'),
-        Tax: getLineItemValue('Tax', 'number'),
-        Amount: getLineItemValue('Amount', 'number'),
+        UnitPrice: getLineItemValue('UnitPrice'),
+        Tax: getLineItemValue('Tax'),
+        Amount: getLineItemValue('Amount'),
       };
+      console.log("Processed Line Item:", lineItem); // For debugging
       return lineItem;
     });
+  } else {
+      console.log("No 'Items' field found or it's not a list."); // For debugging
   }
 
+  console.log(`Extracted ${invoiceData.items.length} line items.`); // For debugging
   return invoiceData;
 };
 
@@ -424,9 +432,9 @@ export const analyzeDocument = async (
       } else { // Handle purchase orders and other document types
         if (result && result.tables?.length) {
           console.log(`Found ${result.tables.length} tables in document`);
-
-          const allItems: POItem[] = [];
           
+          const allItems: POItem[] = [];
+
           result.tables.forEach((table, tableIndex) => {
             console.log(`Processing table ${tableIndex}:`);
             const rawTableData = extractTableData(table);
