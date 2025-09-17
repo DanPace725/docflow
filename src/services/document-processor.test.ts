@@ -306,8 +306,8 @@ describe('analyzeDocument with Invoice', () => {
             documents: [{
                 docType: 'invoice',
                 fields: {
-                    InvoiceId: { value: 'INV-123', content: 'INV-123' },
-                    Items: { values: [] }
+                    InvoiceId: { kind: 'string', value: 'INV-123', content: 'INV-123' },
+                    Items: { kind: 'array', values: [] }
                 }
             }]
         };
@@ -324,12 +324,27 @@ describe('analyzeDocument with Invoice', () => {
             documents: [{
                 docType: 'invoice',
                 fields: {
-                    InvoiceId: { value: 'INV-123' },
-                    InvoiceTotal: { value: 150.75 },
+                    InvoiceId: { kind: 'string', value: 'INV-123' },
+                    InvoiceTotal: { kind: 'number', value: 150.75 },
                     Items: {
+                        kind: 'array',
                         values: [
-                            { properties: { Description: { value: 'Item 1' }, Amount: { value: 100 } } },
-                            { properties: { Description: { value: 'Item 2' }, Quantity: { value: 2 }, UnitPrice: { value: 25.375 }, Amount: { value: 50.75 } } }
+                            {
+                                kind: 'object',
+                                properties: {
+                                    Description: { kind: 'string', value: 'Item 1' },
+                                    Amount: { kind: 'number', value: 100 }
+                                }
+                            },
+                            {
+                                kind: 'object',
+                                properties: {
+                                    Description: { kind: 'string', value: 'Item 2' },
+                                    Quantity: { kind: 'number', value: 2 },
+                                    UnitPrice: { kind: 'number', value: 25.375 },
+                                    Amount: { kind: 'number', value: 50.75 }
+                                }
+                            }
                         ]
                     }
                 }
@@ -344,6 +359,7 @@ describe('analyzeDocument with Invoice', () => {
             expect(result.data.details.InvoiceId).toBe('INV-123');
             expect(result.data.details.InvoiceTotal).toBe(150.75);
             expect(result.data.items).toHaveLength(2);
+            expect(result.data.items.length).toBeGreaterThan(0); // ensure extractInvoiceData returns items
             expect(result.data.items[0].Description).toBe('Item 1');
             expect(result.data.items[1].Amount).toBe(50.75);
         } else {
@@ -395,6 +411,12 @@ describe('generateExcelOutput', () => {
 
     expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith([invoiceData.details]);
     expect(XLSX.utils.json_to_sheet).toHaveBeenCalledWith(invoiceData.items);
+    const jsonCalls = (XLSX.utils.json_to_sheet as SpyInstance).mock.calls;
+    const invoiceItemsCall = jsonCalls.find(call => call[0] === invoiceData.items);
+    expect(invoiceItemsCall).toBeDefined();
+    const itemsArg = invoiceItemsCall?.[0];
+    expect(Array.isArray(itemsArg)).toBe(true);
+    expect((itemsArg as unknown[]).length).toBeGreaterThan(0);
   });
 
   it('should sanitize string properties to null AND preserve numbers (incl 0), nulls, and undefined for POs', async () => {
