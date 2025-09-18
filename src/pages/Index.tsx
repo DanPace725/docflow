@@ -78,7 +78,7 @@ const Index: React.FC = () => {
           const result = await analyzeDocument(page, documentType);
           
           if (result.success && result.data) {
-            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, page.name);
+            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
             setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
             const link = document.createElement('a');
             link.href = url;
@@ -115,7 +115,7 @@ const Index: React.FC = () => {
 
           if (result.success && result.data) {
             toast.success(`Successfully processed ${page.name} on retry.`);
-            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, page.name);
+            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
             setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
             const link = document.createElement('a');
             link.href = url;
