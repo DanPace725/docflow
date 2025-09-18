@@ -138,31 +138,57 @@ const extractInvoiceData = (result: any): InvoiceData => {
   const fields = document.fields;
 
   // Helper to get field value, handling different types including currency
+  const pickDefined = <T>(...values: (T | undefined | null)[]): T | undefined => {
+    for (const value of values) {
+      if (value !== undefined && value !== null) {
+        return value;
+      }
+    }
+    return undefined;
+  };
+
   const getFieldValue = (field: any) => {
     if (!field) {
       return undefined;
     }
 
-    const fieldKind = field.kind ?? field.type;
+    const fieldKind = field.kind ?? field.type ?? field.valueType;
 
     switch (fieldKind) {
       case 'string':
+        return pickDefined(field.valueString, field.value, field.content);
       case 'date':
+        return pickDefined(field.valueDate, field.value, field.content);
+      case 'time':
+        return pickDefined(field.valueTime, field.value, field.content);
+      case 'boolean':
+        return pickDefined(field.valueBoolean, field.value);
+      case 'phoneNumber':
+        return pickDefined(field.valuePhoneNumber, field.value, field.content);
       case 'number':
-        return field.value;
-      case 'currency':
-        // The value of a currency field might be a JSON string, so we parse it.
-        if (typeof field.value === 'string') {
+      case 'integer':
+        return pickDefined(field.valueNumber, field.valueInteger, field.value);
+      case 'currency': {
+        // Prefer the SDK v5 specific valueCurrency shape before falling back.
+        const currencyValue = pickDefined(field.valueCurrency, field.value);
+        if (typeof currencyValue === 'string') {
+          // The value of a currency field might be a JSON string, so we parse it.
           try {
-            const currencyObj = JSON.parse(field.value);
+            const currencyObj = JSON.parse(currencyValue);
             return currencyObj.amount;
           } catch (e) {
             // If parsing fails, return null or log error
             return null;
           }
         }
-        // If it's already an object (as it should be)
-        return field.value?.amount;
+        if (typeof currencyValue === 'number') {
+          return currencyValue;
+        }
+        if (currencyValue && typeof currencyValue.amount === 'number') {
+          return currencyValue.amount;
+        }
+        return pickDefined(currencyValue?.amount, field.content);
+      }
       default:
         return field.content ?? field.value ?? undefined;
     }
@@ -182,11 +208,11 @@ const extractInvoiceData = (result: any): InvoiceData => {
   };
 
   const items: InvoiceItem[] = [];
-  const itemFields = fields.Items?.values;
+  const itemFields = fields.Items?.valueArray ?? fields.Items?.values;
   if (Array.isArray(itemFields)) {
     for (const itemField of itemFields) {
-      if (itemField?.kind === 'object' && itemField.properties) {
-        const props = itemField.properties;
+      const props = itemField?.valueObject ?? itemField?.properties;
+      if (props) {
         const item: InvoiceItem = {
           Description: getFieldValue(props.Description),
           // Handle cases where quantity might be under OrderQuantity
