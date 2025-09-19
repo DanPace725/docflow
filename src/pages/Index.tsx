@@ -17,9 +17,7 @@ import {
   generateExcelOutput,
   aggregateInvoiceData,
   DocumentType,
-  InvoiceData,
-  //pullPrices as pullPricesService,
-  //batchClean as batchCleanService
+  InvoiceData
 } from '@/services/document-processor';
 
 const Index: React.FC = () => {
@@ -224,56 +222,6 @@ const Index: React.FC = () => {
     document.getElementById('file-input')?.click();
   };
 
-  const handleViewOutput = () => {
-    // In a real app, this would open the output folder
-    // Here we'll just show a toast
-    toast.info("View Output", {
-      description: "In a production environment, this would open the output folder.",
-    });
-  };
-
-  const handlePullPrices = async () => {
-  //   setStatus('processing');
-  //   setStatusMessage('Pulling prices from database...');
-  //   setProgress(50);
-  //   
-  //   try {
-  //     await pullPricesService();
-  //     setStatus('success');
-  //     setStatusMessage('Price data successfully updated');
-  //     toast.success("Prices Updated", {
-  //       description: "Successfully pulled and updated price data",
-  //     });
-  //   } catch (error) {
-  //     setStatus('error');
-  //     setStatusMessage(`Error pulling prices: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  //     toast.error("Error", {
-  //       description: "Failed to pull price data",
-  //     });
-  //   }
-   };
-
-  const handleBatchClean = async () => {
-  //   setStatus('processing');
-  //   setStatusMessage('Running batch clean process...');
-  //   setProgress(50);
-  //   
-  //   try {
-  //     await batchCleanService();
-  //     setStatus('success');
-  //     setStatusMessage('Batch clean completed successfully');
-  //     toast.success("Batch Clean", {
-  //       description: "Successfully completed batch clean process",
-  //     });
-  //   } catch (error) {
-  //     setStatus('error');
-  //     setStatusMessage(`Error during batch clean: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  //     toast.error("Error", {
-  //       description: "Failed to complete batch clean process",
-  //     });
-  //   }
-  };
-
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <Header />
@@ -298,12 +246,9 @@ const Index: React.FC = () => {
               progress={progress} 
             />
             
-            <ActionButtons 
+            <ActionButtons
               onImport={handleImport}
               onProcess={handleProcess}
-              onViewOutput={handleViewOutput}
-              onPullPrices={handlePullPrices}
-              onBatchClean={handleBatchClean}
               isProcessing={status === 'processing'}
               hasFiles={files.length > 0}
             />
