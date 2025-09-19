@@ -1,4 +1,4 @@
-import { AzureKeyCredential, DocumentAnalysisClient } from "@azure/ai-form-recognizer";
+import { AzureKeyCredential, DocumentAnalysisClient, DocumentField } from "@azure/ai-form-recognizer";
 import { PDFDocument } from 'pdf-lib';
 import * as XLSX from 'xlsx';
 
@@ -280,6 +280,30 @@ const replaceImportHeaders = (tableData: string[][]): string[][] => {
   return [newHeaders, ...processedData.slice(1)];
 };
 
+// Helper function to extract value from a DocumentField, supporting V5 and older SDK versions
+const getFieldValue = (field: DocumentField | undefined, type: 'string' | 'number' | 'date' | 'currency'): any => {
+  if (!field) {
+    return undefined;
+  }
+
+  // V5 SDK-specific value types
+  if (type === 'string' && field.valueString) return field.valueString;
+  if (type === 'number' && field.valueNumber) return field.valueNumber;
+  if (type === 'date' && field.valueDate) return field.valueDate;
+  if (type === 'currency' && field.valueCurrency) return field.valueCurrency.amount;
+
+  // Fallback for older SDK versions or generic 'value'
+  if (field.value) {
+    if (type === 'currency' && typeof field.value === 'object' && field.value !== null && 'amount' in field.value) {
+      return (field.value as any).amount;
+    }
+    // For other types, the plain value is sufficient.
+    return field.value;
+  }
+
+  return undefined;
+};
+
 // Enhanced analyze document function
 export const analyzeDocument = async (
   file: File,
@@ -290,9 +314,9 @@ export const analyzeDocument = async (
   const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
 
   const fileBuffer = await file.arrayBuffer();
-  const modelId = 'prebuilt-document';
+  const modelId = 'prebuilt-purchaseOrder';
 
-  console.log(`Processing document: ${file.name}`);
+  console.log(`Processing document: ${file.name} with model: ${modelId}`);
 
   // Retry mechanism
   const maxRetries = MAX_RETRIES;
@@ -303,9 +327,56 @@ export const analyzeDocument = async (
       const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
       const result = await poller.pollUntilDone();
 
-      if (result && result.tables?.length) {
-        console.log(`Found ${result.tables.length} tables in document`);
+      const { documents } = result;
+
+      if (documents && documents.length > 0) {
+        const document = documents[0];
+        console.log(`Successfully extracted document of type: ${document.docType}`);
+        const { fields } = document;
+
+        const allItems: POItem[] = [];
+        const itemsField = fields.Items;
+
+        if (itemsField) {
+          // SDK v5 uses `valueArray`, older versions might use `values`
+          const items = itemsField.valueArray ?? (itemsField as any).values;
+
+          if (items) {
+            for (const itemField of items) {
+              // SDK v5 uses `valueObject`, older versions might use `properties`
+              const props = itemField.valueObject ?? (itemField as any).properties;
+
+              if (props) {
+                const poItem: POItem = {
+                  description: getFieldValue(props.Description, 'string'),
+                  pu_quant: getFieldValue(props.Quantity, 'number'),
+                  pu_price: getFieldValue(props.UnitPrice, 'currency'),
+                  total: getFieldValue(props.Amount, 'currency'),
+                  pr_codenum: getFieldValue(props.ProductCode, 'string'),
+                };
+                allItems.push(poItem);
+              }
+            }
+          }
+        }
+
+        const poData: PurchaseOrderData = {
+          poNumber: getFieldValue(fields.PurchaseOrderNumber, 'string'),
+          poDate: getFieldValue(fields.PurchaseOrderDate, 'date')?.toString(),
+          vendor: getFieldValue(fields.VendorName, 'string'),
+          total: getFieldValue(fields.SubTotal, 'currency') ?? getFieldValue(fields.Total, 'currency'),
+          items: allItems,
+        };
+
+        console.log(`Extracted PO# ${poData.poNumber} from vendor ${poData.vendor}`);
+        return { success: true, data: poData };
+
+      } else if (result && result.tables?.length) {
+        // Fallback for older payloads that might not have `documents` but have `tables`.
+        console.warn('No documents found in result, attempting to process tables as a fallback.');
         
+        console.log(`Found ${result.tables.length} tables in document`);
+
         const allItems: POItem[] = [];
         
         result.tables.forEach((table, tableIndex) => {
@@ -341,11 +412,11 @@ export const analyzeDocument = async (
           total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
         };
 
-        console.log(`Total items processed: ${allItems.length}`);
+        console.log(`Total items processed from tables: ${allItems.length}`);
         return { success: true, data: poData };
       }
       
-      return { success: false, error: 'No table data found in document' };
+      return { success: false, error: 'No structured document or table data found' };
 
     } catch (error: any) {
       console.error(`Attempt ${attempt + 1} for ${file.name} failed. Error: ${error.message}`);
@@ -359,6 +430,13 @@ export const analyzeDocument = async (
             const retryAfterSeconds = parseInt(retryAfterHeader, 10);
             if (!isNaN(retryAfterSeconds)) {
               currentDelay = retryAfterSeconds * 1000;
+            }
+          } else if (error.retryAfterInMs) {
+            currentDelay = error.retryAfterInMs;
+          } else {
+            const match = error.message.match(/retry after (\d+) seconds/i);
+            if (match && match[1]) {
+              currentDelay = parseInt(match[1], 10) * 1000;
             }
           }
         }

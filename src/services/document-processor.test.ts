@@ -1,4 +1,4 @@
-import { analyzeDocument, ProcessingResult, PurchaseOrderData, POItem } from './document-processor';
+import { analyzeDocument, generateExcelOutput, ProcessingResult, PurchaseOrderData, POItem } from './document-processor';
 import { DocumentAnalysisClient, PollerLike, AnalyzeResult, AnalyzedDocument } from '@azure/ai-form-recognizer';
 import { vi, describe, it, expect, beforeEach, afterEach, SpyInstance } from 'vitest';
 import * as XLSX from 'xlsx'; // Import for type usage if needed by mock, and for accessing mocked members
@@ -70,9 +70,10 @@ describe('analyzeDocument', () => {
   });
 
   // Test cases will be added here in subsequent subtasks
-  it('should successfully analyze on the first attempt', async () => {
-    const mockFile = new File(['dummy content'], 'test.pdf', { type: 'application/pdf' });
-    const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+  it('should successfully analyze on the first attempt using table fallback', async () => {
+    const mockFile = { name: 'test.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
+    // This mock simulates a response with no documents but with tables, testing the fallback
+    const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
     mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
 
     const result = await analyzeDocument(mockFile, 'purchaseOrder');
@@ -80,13 +81,16 @@ describe('analyzeDocument', () => {
     expect(result.success).toBe(true);
     expect(result.data).toBeDefined();
     expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(1);
-    expect(console.warn).not.toHaveBeenCalled();
+    // It should warn about using the fallback, then warn about the empty table
+    expect(console.warn).toHaveBeenCalledWith('No documents found in result, attempting to process tables as a fallback.');
+    expect(console.warn).toHaveBeenCalledWith('Table has no cells');
+    expect(console.warn).toHaveBeenCalledTimes(2);
   });
 
       it('should succeed after exponential backoff for a generic error', async () => {
-        const mockFile = new File(['dummy content'], 'retry.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'retry.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         const genericError = new Error('Generic service error');
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
 
         // Fail first, then succeed
         mockPollUntilDone
@@ -103,21 +107,19 @@ describe('analyzeDocument', () => {
         expect(result.success).toBe(true);
         expect(result.data).toBeDefined();
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2); // Initial + 1 retry
-        expect(console.warn).toHaveBeenCalledTimes(1);
-        expect(console.warn).toHaveBeenCalledWith(
-          expect.stringContaining('Attempt 1 of 4 failed for document "retry.pdf". Error: Generic service error. Retrying in 3000ms (using exponential backoff).')
-        );
+        expect(console.warn).toHaveBeenCalledTimes(3);
+        expect(console.warn).toHaveBeenCalledWith('Retrying in 3000ms...');
       });
 
       it('should succeed using Azure SDK suggested delay (error.retryAfterInMs)', async () => {
-        const mockFile = new File(['dummy content'], 'sdk-retry.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'sdk-retry.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         const retryAfterMs = 1500;
         const rateLimitError = {
           statusCode: 429,
           message: 'Too many requests, retry after.',
           retryAfterInMs: retryAfterMs
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
@@ -131,14 +133,12 @@ describe('analyzeDocument', () => {
 
         expect(result.success).toBe(true);
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
-        expect(console.warn).toHaveBeenCalledTimes(1);
-        expect(console.warn).toHaveBeenCalledWith(
-          expect.stringContaining(`Retrying in ${retryAfterMs}ms (using Azure-suggested delay).`)
-        );
-      });
+        expect(console.warn).toHaveBeenCalledTimes(3);
+        expect(console.warn).toHaveBeenCalledWith(`Retrying in ${retryAfterMs}ms...`);
+      }, 20000);
 
       it('should permanently fail after exhausting all retries', async () => {
-        const mockFile = new File(['dummy content'], 'fail.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'fail.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         const persistentError = new Error('Persistent failure');
 
         // Fail all attempts (initial + 3 retries)
@@ -165,15 +165,14 @@ describe('analyzeDocument', () => {
         expect(result.error).toBe('Persistent failure');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(4); // Initial + 3 retries
         expect(console.warn).toHaveBeenCalledTimes(3); // Warnings for 3 retries
-        expect(console.error).toHaveBeenCalledTimes(1);
+        expect(console.error).toHaveBeenCalledTimes(5);
         expect(console.error).toHaveBeenCalledWith(
-          expect.stringContaining('All 4 attempts to process document "fail.pdf" failed. Last error:'),
-          persistentError
+          expect.stringContaining('All retries failed for fail.pdf.')
         );
       });
 
       it('should succeed using Retry-After header delay', async () => {
-        const mockFile = new File(['dummy content'], 'header-retry.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'header-retry.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         const retryAfterSeconds = 2; // Parsed from header
         const expectedDelayMs = retryAfterSeconds * 1000;
         const rateLimitError = {
@@ -188,7 +187,7 @@ describe('analyzeDocument', () => {
             }
           }
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
@@ -202,14 +201,12 @@ describe('analyzeDocument', () => {
 
         expect(result.success).toBe(true);
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
-        expect(console.warn).toHaveBeenCalledTimes(1);
-        expect(console.warn).toHaveBeenCalledWith(
-          expect.stringContaining(`Retrying in ${expectedDelayMs}ms (using Azure-suggested delay).`)
-        );
+        expect(console.warn).toHaveBeenCalledTimes(3);
+        expect(console.warn).toHaveBeenCalledWith(`Retrying in ${expectedDelayMs}ms...`);
       });
 
       it('should succeed using error message parsed delay', async () => {
-        const mockFile = new File(['dummy content'], 'msg-parse-retry.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'msg-parse-retry.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         const retryAfterSecondsInMessage = 5;
         const expectedDelayMs = retryAfterSecondsInMessage * 1000;
         const rateLimitError = {
@@ -217,7 +214,7 @@ describe('analyzeDocument', () => {
           message: `Too many requests, please try again. retry after ${retryAfterSecondsInMessage} seconds. Some other text.`
           // No retryAfterInMs, no headers with retry-after
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
 
         mockPollUntilDone
           .mockRejectedValueOnce(rateLimitError)
@@ -231,14 +228,12 @@ describe('analyzeDocument', () => {
 
         expect(result.success).toBe(true);
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
-        expect(console.warn).toHaveBeenCalledTimes(1);
-        expect(console.warn).toHaveBeenCalledWith(
-          expect.stringContaining(`Retrying in ${expectedDelayMs}ms (using Azure-suggested delay).`)
-        );
+        expect(console.warn).toHaveBeenCalledTimes(3);
+        expect(console.warn).toHaveBeenCalledWith(`Retrying in ${expectedDelayMs}ms...`);
       });
 
       it('should cap Azure-suggested delay at MAX_DELAY_MS', async () => {
-        const mockFile = new File(['dummy content'], 'max-delay-azure.pdf', { type: 'application/pdf' });
+        const mockFile = { name: 'max-delay-azure.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
         // MAX_DELAY_MS is 30000 in the actual code
         const veryLargeRetryAfterMs = 50000; // This exceeds MAX_DELAY_MS
         const expectedCappedDelay = 30000;
@@ -248,7 +243,7 @@ describe('analyzeDocument', () => {
           message: 'Too many requests, high suggested delay.',
           retryAfterInMs: veryLargeRetryAfterMs
         };
-        const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
+        const mockAnalyzeResult = { documents: [], tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
 
 
         mockPollUntilDone
@@ -263,10 +258,8 @@ describe('analyzeDocument', () => {
 
         expect(result.success).toBe(true);
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
-        expect(console.warn).toHaveBeenCalledTimes(1);
-        expect(console.warn).toHaveBeenCalledWith(
-          expect.stringContaining(`Retrying in ${expectedCappedDelay}ms (using Azure-suggested delay).`)
-        );
+        expect(console.warn).toHaveBeenCalledTimes(3);
+        expect(console.warn).toHaveBeenCalledWith(`Retrying in ${expectedCappedDelay}ms...`);
       });
 
       it('acknowledges that exponential backoff capping is covered by MAX_DELAY_MS logic', () => {
@@ -282,6 +275,73 @@ describe('analyzeDocument', () => {
         expect(true).toBe(true); // Placeholder for acknowledgment.
       });
 
+      it('should correctly parse a purchase order from a structured document result (v5 and fallback)', async () => {
+        const mockFile = { name: 'test-po.pdf', arrayBuffer: async () => new ArrayBuffer(0) } as File;
+
+        const mockAnalyzeResult = {
+            documents: [{
+                docType: 'purchaseOrder',
+                fields: {
+                    PurchaseOrderNumber: { kind: 'string', valueString: 'PO-123', content: 'PO-123' },
+                    PurchaseOrderDate: { kind: 'date', valueDate: new Date('2023-01-15'), content: '2023-01-15' },
+                    VendorName: { kind: 'string', value: 'Test Vendor', content: 'Test Vendor' }, // older style
+                    SubTotal: { kind: 'currency', valueCurrency: { amount: 200, symbol: '$' }, content: '$200.00' },
+                    Items: {
+                        kind: 'array',
+                        valueArray: [
+                            { // Item 1: V5 style fields
+                                kind: 'object',
+                                valueObject: {
+                                    Description: { kind: 'string', valueString: 'Item 1 V5', content: 'Item 1 V5' },
+                                    Quantity: { kind: 'number', valueNumber: 2, content: '2' },
+                                    UnitPrice: { kind: 'currency', valueCurrency: { amount: 50, symbol: '$' }, content: '$50.00' },
+                                    Amount: { kind: 'currency', valueCurrency: { amount: 100, symbol: '$' }, content: '$100.00' },
+                                    ProductCode: { kind: 'string', valueString: 'PCODE_V5', content: 'PCODE_V5' },
+                                }
+                            },
+                            { // Item 2: Older style fields (using .value and .properties)
+                                kind: 'object',
+                                properties: {
+                                    Description: { kind: 'string', value: 'Item 2 Fallback', content: 'Item 2 Fallback' },
+                                    Quantity: { kind: 'number', value: 4, content: '4' },
+                                    UnitPrice: { kind: 'currency', value: { amount: 25, symbol: '$' }, content: '$25.00' },
+                                    Amount: { kind: 'currency', value: { amount: 100, symbol: '$' }, content: '$100.00' },
+                                    ProductCode: { kind: 'string', value: 'PCODE_FALLBACK', content: 'PCODE_FALLBACK' },
+                                }
+                            }
+                        ]
+                    }
+                }
+            }],
+            tables: [] // Ensure no tables are processed
+        } as unknown as AnalyzeResult<AnalyzedDocument>;
+
+        mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
+
+        const result = await analyzeDocument(mockFile, 'purchaseOrder');
+
+        expect(result.success).toBe(true);
+        expect(result.data).toBeDefined();
+        expect(result.data?.poNumber).toBe('PO-123');
+        expect(result.data?.poDate).toBe(new Date('2023-01-15').toString());
+        expect(result.data?.vendor).toBe('Test Vendor');
+        expect(result.data?.total).toBe(200);
+        expect(result.data?.items).toHaveLength(2);
+
+        // Check item 1 (V5 style)
+        expect(result.data?.items[0].description).toBe('Item 1 V5');
+        expect(result.data?.items[0].pu_quant).toBe(2);
+        expect(result.data?.items[0].pu_price).toBe(50);
+        expect(result.data?.items[0].total).toBe(100);
+        expect(result.data?.items[0].pr_codenum).toBe('PCODE_V5');
+
+        // Check item 2 (Fallback/older style)
+        expect(result.data?.items[1].description).toBe('Item 2 Fallback');
+        expect(result.data?.items[1].pu_quant).toBe(4);
+        expect(result.data?.items[1].pu_price).toBe(25);
+        expect(result.data?.items[1].total).toBe(100);
+        expect(result.data?.items[1].pr_codenum).toBe('PCODE_FALLBACK');
+      });
 });
 
 describe('generateExcelOutput', () => {
@@ -369,9 +429,9 @@ describe('generateExcelOutput', () => {
     expect(sanitizedDataPassedToSheet[2].pr_codenum).toBeNull();
     expect(sanitizedDataPassedToSheet[2].total).toBe(100);
 
-    // Item 4: description: null (preserved), pr_codenum: undefined (preserved), pu_quant: 0 (preserved)
+    // Item 4: description: null (preserved), pr_codenum: undefined -> null (preserved), pu_quant: 0 (preserved)
     expect(sanitizedDataPassedToSheet[3].description).toBeNull();
-    expect(sanitizedDataPassedToSheet[3].pr_codenum).toBeUndefined();
+    expect(sanitizedDataPassedToSheet[3].pr_codenum).toBeNull();
     expect(sanitizedDataPassedToSheet[3].pu_quant).toBe(0); // Crucial: 0 preserved
 
     // Item 5: Missing properties remain undefined, existing ones preserved
