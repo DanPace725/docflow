@@ -319,6 +319,42 @@ const getFieldValue = (field: any): any => {
 
   const kind = field.kind || field.valueType;
 
+  if (kind === 'currency') {
+    const currencyValue = field.value ?? field;
+
+    if (currencyValue !== undefined && currencyValue !== null) {
+      if (typeof currencyValue === 'number' || typeof currencyValue === 'string') {
+        const numeric = typeof currencyValue === 'string' ? Number(currencyValue.replace(/,/g, '')) : currencyValue;
+        return Number.isNaN(numeric) ? currencyValue : numeric;
+      }
+
+      if (typeof currencyValue === 'object') {
+        const possibleAmount = currencyValue.amount ?? currencyValue.value ?? currencyValue.decimalValue;
+        if (possibleAmount !== undefined && possibleAmount !== null) {
+          if (typeof possibleAmount === 'string') {
+            const parsed = Number(possibleAmount.replace(/,/g, ''));
+            return Number.isNaN(parsed) ? possibleAmount : parsed;
+          }
+          return possibleAmount;
+        }
+
+        if (currencyValue.currencyAmount !== undefined && currencyValue.currencyAmount !== null) {
+          if (typeof currencyValue.currencyAmount === 'string') {
+            const parsed = Number(currencyValue.currencyAmount.replace(/,/g, ''));
+            return Number.isNaN(parsed) ? currencyValue.currencyAmount : parsed;
+          }
+          return currencyValue.currencyAmount;
+        }
+      }
+    }
+
+    if (field.content !== undefined) {
+      return field.content;
+    }
+
+    return null;
+  }
+
   if (kind === 'array' && Array.isArray(field.values)) {
     return field.values.map((value: any) => getFieldValue(value));
   }

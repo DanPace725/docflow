@@ -314,6 +314,11 @@ describe('analyzeDocument', () => {
               fields: {
                 VendorName: { kind: 'string', value: 'Acme Industries' },
                 InvoiceId: { kind: 'string', value: 'INV-001' },
+                InvoiceTotal: {
+                  kind: 'currency',
+                  value: { amount: 199.98, currencySymbol: '$', currencyCode: 'USD' },
+                  content: '$199.98'
+                },
                 Items: {
                   kind: 'array',
                   values: [
@@ -322,6 +327,16 @@ describe('analyzeDocument', () => {
                       properties: {
                         Description: { kind: 'string', value: 'Widget' },
                         Quantity: { kind: 'number', value: 2 },
+                        UnitPrice: {
+                          kind: 'currency',
+                          value: { amount: 25, currencySymbol: '$' },
+                          content: '$25.00'
+                        },
+                        Amount: {
+                          kind: 'currency',
+                          value: { amount: 50, currencyCode: 'USD' },
+                          content: '$50.00'
+                        }
                       }
                     }
                   ]
@@ -341,9 +356,12 @@ describe('analyzeDocument', () => {
         expect(result.documentType).toBe('invoice');
         expect(result.data.fields.VendorName).toBe('Acme Industries');
         expect(result.data.fields.InvoiceId).toBe('INV-001');
+        expect(result.data.fields.InvoiceTotal).toBe(199.98);
         expect(result.data.lineItems).toHaveLength(1);
         expect(result.data.lineItems[0].Description).toBe('Widget');
         expect(result.data.lineItems[0].Quantity).toBe(2);
+        expect(result.data.lineItems[0].UnitPrice).toBe(25);
+        expect(result.data.lineItems[0].Amount).toBe(50);
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledWith('prebuilt-invoice', expect.any(ArrayBuffer));
       });
 
@@ -477,11 +495,11 @@ describe('generateExcelOutput', () => {
   it('should generate invoice workbooks with separate detail and line item sheets', async () => {
     const invoiceData = {
       details: [
-        { VendorName: 'Acme Industries', Notes: '   ' }
+        { VendorName: 'Acme Industries', Notes: '   ', AmountDue: 199.98 }
       ],
       lineItems: [
-        { Description: 'Widget', Quantity: 2 },
-        { Description: '', Quantity: undefined }
+        { Description: 'Widget', Quantity: 2, UnitPrice: 25, Amount: 50 },
+        { Description: '', Quantity: undefined, UnitPrice: 0, Amount: 0 }
       ]
     };
 
@@ -493,10 +511,18 @@ describe('generateExcelOutput', () => {
 
     expect(detailSheetRows[0].VendorName).toBe('Acme Industries');
     expect(detailSheetRows[0].Notes).toBeNull();
+    expect(detailSheetRows[0].AmountDue).toBe(199.98);
+    expect(typeof detailSheetRows[0].AmountDue).toBe('number');
 
     expect(lineItemSheetRows[0].Description).toBe('Widget');
     expect(lineItemSheetRows[0].Quantity).toBe(2);
+    expect(lineItemSheetRows[0].UnitPrice).toBe(25);
+    expect(typeof lineItemSheetRows[0].UnitPrice).toBe('number');
+    expect(lineItemSheetRows[0].Amount).toBe(50);
+    expect(typeof lineItemSheetRows[0].Amount).toBe('number');
     expect(lineItemSheetRows[1].Description).toBeNull();
     expect(lineItemSheetRows[1].Quantity).toBeUndefined();
+    expect(lineItemSheetRows[1].UnitPrice).toBe(0);
+    expect(lineItemSheetRows[1].Amount).toBe(0);
   });
 });
