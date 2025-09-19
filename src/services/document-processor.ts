@@ -314,7 +314,7 @@ export const analyzeDocument = async (
   const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
 
   const fileBuffer = await file.arrayBuffer();
-  const modelId = 'prebuilt-purchaseOrder';
+  const modelId = 'prebuilt-document';
 
   console.log(`Processing document: ${file.name} with model: ${modelId}`);
 
