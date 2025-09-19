@@ -65,17 +65,19 @@ describe('Index Page - handleProcess', () => {
       //  - The application should not crash (test will fail if it does).
       //  - A toast error message should be displayed to the user.
       expect(mockedToastError).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to process page: test_page_1.pdf. Error: No table data found')
+        expect.stringContaining('Initial processing failed for page: test_page_1.pdf. Error: No table data found')
       );
     });
-    
+
     await waitFor(() => {
-        expect(mockedToastError).toHaveBeenCalledWith(
-            "Processing completed with errors",
-            expect.objectContaining({
-                description: expect.stringContaining("Processed 1 file(s) with 1 page(s) having errors.\nDetails:\nFailed to process page: test_page_1.pdf. Error: No table data found\n")
-            })
-        );
+      expect(mockedToastError).toHaveBeenCalledWith(
+        "Processing completed with permanent errors",
+        expect.objectContaining({
+          description: expect.stringContaining(
+            "Details:\nInitial processing failed for page: test_page_1.pdf. Error: No table data found\n"
+          )
+        })
+      );
     });
 
     //  - The `generateExcelOutput` function should NOT have been called.
@@ -84,16 +86,8 @@ describe('Index Page - handleProcess', () => {
     //  - The overall status message should indicate that processing completed, but with errors.
     // The ProcessStatus component displays this message.
     // We check for part of the message due to potential dynamic updates.
-    expect(screen.getByText(/Processed 1 file\(s\) with 1 page\(s\) having errors./i)).toBeInTheDocument();
-    
-    // Also check the final toast that summarizes the errors
-     await waitFor(() => {
-        expect(mockedToastError).toHaveBeenCalledWith(
-            "Processing completed with errors",
-            expect.objectContaining({
-                description: expect.stringContaining("Processed 1 file(s) with 1 page(s) having errors.")
-            })
-        );
-    });
+    expect(
+      screen.getByText(/Processing complete\. 1 file\(s\) processed with 1 permanent error\(s\)./i)
+    ).toBeInTheDocument();
   });
 });

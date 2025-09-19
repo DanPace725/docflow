@@ -1,4 +1,4 @@
-import { analyzeDocument, ProcessingResult, PurchaseOrderData, POItem } from './document-processor';
+import { analyzeDocument, PurchaseOrderData, POItem } from './document-processor';
 import { DocumentAnalysisClient, PollerLike, AnalyzeResult, AnalyzedDocument } from '@azure/ai-form-recognizer';
 import { vi, describe, it, expect, beforeEach, afterEach, SpyInstance } from 'vitest';
 import * as XLSX from 'xlsx'; // Import for type usage if needed by mock, and for accessing mocked members
@@ -75,11 +75,16 @@ describe('analyzeDocument', () => {
     const mockAnalyzeResult = { tables: [{ cells: [], rowCount: 1, columnCount: 1 }] } as unknown as AnalyzeResult<AnalyzedDocument>;
     mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
 
-    const result = await analyzeDocument(mockFile, 'purchaseOrder');
+    const result = await analyzeDocument(mockFile, 'purchase-order');
 
     expect(result.success).toBe(true);
-    expect(result.data).toBeDefined();
+    if (!result.success) {
+      throw new Error('Expected analysis to succeed');
+    }
+    expect(result.documentType).toBe('purchase-order');
+    expect(result.data.items).toBeDefined();
     expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(1);
+    expect(mockBeginAnalyzeDocument.mock.calls[0][0]).toBe('prebuilt-document');
     expect(console.warn).not.toHaveBeenCalled();
   });
 
@@ -93,7 +98,7 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(genericError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         // Advance timers for the first retry's delay (INITIAL_DELAY_MS = 3000)
         await vi.advanceTimersByTimeAsync(3000);
@@ -101,7 +106,10 @@ describe('analyzeDocument', () => {
         const result = await promise;
 
         expect(result.success).toBe(true);
-        expect(result.data).toBeDefined();
+        if (!result.success) {
+          throw new Error('Expected analysis to succeed');
+        }
+        expect(result.documentType).toBe('purchase-order');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2); // Initial + 1 retry
         expect(console.warn).toHaveBeenCalledTimes(1);
         expect(console.warn).toHaveBeenCalledWith(
@@ -123,13 +131,17 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         await vi.advanceTimersByTimeAsync(retryAfterMs);
 
         const result = await promise;
 
         expect(result.success).toBe(true);
+        if (!result.success) {
+          throw new Error('Expected analysis to succeed');
+        }
+        expect(result.documentType).toBe('purchase-order');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
         expect(console.warn).toHaveBeenCalledTimes(1);
         expect(console.warn).toHaveBeenCalledWith(
@@ -148,7 +160,7 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(persistentError) // Retry 2
           .mockRejectedValueOnce(persistentError); // Retry 3
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         // Advance timers for all retry delays
         // INITIAL_DELAY_MS = 3000
@@ -194,13 +206,17 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         await vi.advanceTimersByTimeAsync(expectedDelayMs);
 
         const result = await promise;
 
         expect(result.success).toBe(true);
+        if (!result.success) {
+          throw new Error('Expected analysis to succeed');
+        }
+        expect(result.documentType).toBe('purchase-order');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
         expect(console.warn).toHaveBeenCalledTimes(1);
         expect(console.warn).toHaveBeenCalledWith(
@@ -223,13 +239,17 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(rateLimitError)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         await vi.advanceTimersByTimeAsync(expectedDelayMs);
 
         const result = await promise;
 
         expect(result.success).toBe(true);
+        if (!result.success) {
+          throw new Error('Expected analysis to succeed');
+        }
+        expect(result.documentType).toBe('purchase-order');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
         expect(console.warn).toHaveBeenCalledTimes(1);
         expect(console.warn).toHaveBeenCalledWith(
@@ -255,13 +275,17 @@ describe('analyzeDocument', () => {
           .mockRejectedValueOnce(rateLimitErrorHighDelay)
           .mockResolvedValueOnce(mockAnalyzeResult);
 
-        const promise = analyzeDocument(mockFile, 'purchaseOrder');
+        const promise = analyzeDocument(mockFile, 'purchase-order');
 
         await vi.advanceTimersByTimeAsync(expectedCappedDelay); // Advance by the capped delay
 
         const result = await promise;
 
         expect(result.success).toBe(true);
+        if (!result.success) {
+          throw new Error('Expected analysis to succeed');
+        }
+        expect(result.documentType).toBe('purchase-order');
         expect(mockBeginAnalyzeDocument).toHaveBeenCalledTimes(2);
         expect(console.warn).toHaveBeenCalledTimes(1);
         expect(console.warn).toHaveBeenCalledWith(
@@ -280,6 +304,65 @@ describe('analyzeDocument', () => {
         // is applied universally. The 'should cap Azure-suggested delay at MAX_DELAY_MS'
         // test already verifies this capping mechanism works as intended.
         expect(true).toBe(true); // Placeholder for acknowledgment.
+      });
+
+      it('should analyze invoices using the invoice model and flatten line items', async () => {
+        const mockFile = new File(['invoice content'], 'invoice.pdf', { type: 'application/pdf' });
+        const mockAnalyzeResult = {
+          documents: [
+            {
+              fields: {
+                VendorName: { kind: 'string', value: 'Acme Industries' },
+                InvoiceId: { kind: 'string', value: 'INV-001' },
+                InvoiceTotal: {
+                  kind: 'currency',
+                  value: { amount: 199.98, currencySymbol: '$', currencyCode: 'USD' },
+                  content: '$199.98'
+                },
+                Items: {
+                  kind: 'array',
+                  values: [
+                    {
+                      kind: 'object',
+                      properties: {
+                        Description: { kind: 'string', value: 'Widget' },
+                        Quantity: { kind: 'number', value: 2 },
+                        UnitPrice: {
+                          kind: 'currency',
+                          value: { amount: 25, currencySymbol: '$' },
+                          content: '$25.00'
+                        },
+                        Amount: {
+                          kind: 'currency',
+                          value: { amount: 50, currencyCode: 'USD' },
+                          content: '$50.00'
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        } as unknown as AnalyzeResult<AnalyzedDocument>;
+        mockPollUntilDone.mockResolvedValue(mockAnalyzeResult);
+
+        const result = await analyzeDocument(mockFile, 'invoice');
+
+        expect(result.success).toBe(true);
+        if (!result.success) {
+          throw new Error('Expected invoice analysis to succeed');
+        }
+        expect(result.documentType).toBe('invoice');
+        expect(result.data.fields.VendorName).toBe('Acme Industries');
+        expect(result.data.fields.InvoiceId).toBe('INV-001');
+        expect(result.data.fields.InvoiceTotal).toBe(199.98);
+        expect(result.data.lineItems).toHaveLength(1);
+        expect(result.data.lineItems[0].Description).toBe('Widget');
+        expect(result.data.lineItems[0].Quantity).toBe(2);
+        expect(result.data.lineItems[0].UnitPrice).toBe(25);
+        expect(result.data.lineItems[0].Amount).toBe(50);
+        expect(mockBeginAnalyzeDocument).toHaveBeenCalledWith('prebuilt-invoice', expect.any(ArrayBuffer));
       });
 
 });
@@ -345,7 +428,7 @@ describe('generateExcelOutput', () => {
     // mockJsonToSheet is already assigned in beforeEach from the mocked XLSX module
     // Other XLSX mocks (book_new, book_append_sheet, write) should be active from the suite's setup
 
-    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test.pdf');
+    await generateExcelOutput(purchaseOrderData, 'purchase-order', 'test.pdf');
 
     expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
     const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
@@ -394,7 +477,7 @@ describe('generateExcelOutput', () => {
       ],
     };
 
-    await generateExcelOutput(purchaseOrderData, 'purchaseOrder', 'test2.pdf');
+    await generateExcelOutput(purchaseOrderData, 'purchase-order', 'test2.pdf');
 
     expect(mockJsonToSheet).toHaveBeenCalledTimes(1);
     const sanitizedDataPassedToSheet = mockJsonToSheet.mock.calls[0][0];
@@ -407,5 +490,39 @@ describe('generateExcelOutput', () => {
     expect(sanitizedDataPassedToSheet[1].pu_price).toBe(0);
     expect(sanitizedDataPassedToSheet[1].total).toBe(0);
     expect(sanitizedDataPassedToSheet[1].description).toBeUndefined();
+  });
+
+  it('should generate invoice workbooks with separate detail and line item sheets', async () => {
+    const invoiceData = {
+      details: [
+        { VendorName: 'Acme Industries', Notes: '   ', AmountDue: 199.98 }
+      ],
+      lineItems: [
+        { Description: 'Widget', Quantity: 2, UnitPrice: 25, Amount: 50 },
+        { Description: '', Quantity: undefined, UnitPrice: 0, Amount: 0 }
+      ]
+    };
+
+    await generateExcelOutput(invoiceData, 'invoice', 'invoice.pdf');
+
+    expect(mockJsonToSheet).toHaveBeenCalledTimes(2);
+    const detailSheetRows = mockJsonToSheet.mock.calls[0][0];
+    const lineItemSheetRows = mockJsonToSheet.mock.calls[1][0];
+
+    expect(detailSheetRows[0].VendorName).toBe('Acme Industries');
+    expect(detailSheetRows[0].Notes).toBeNull();
+    expect(detailSheetRows[0].AmountDue).toBe(199.98);
+    expect(typeof detailSheetRows[0].AmountDue).toBe('number');
+
+    expect(lineItemSheetRows[0].Description).toBe('Widget');
+    expect(lineItemSheetRows[0].Quantity).toBe(2);
+    expect(lineItemSheetRows[0].UnitPrice).toBe(25);
+    expect(typeof lineItemSheetRows[0].UnitPrice).toBe('number');
+    expect(lineItemSheetRows[0].Amount).toBe(50);
+    expect(typeof lineItemSheetRows[0].Amount).toBe('number');
+    expect(lineItemSheetRows[1].Description).toBeNull();
+    expect(lineItemSheetRows[1].Quantity).toBeUndefined();
+    expect(lineItemSheetRows[1].UnitPrice).toBe(0);
+    expect(lineItemSheetRows[1].Amount).toBe(0);
   });
 });

@@ -6,6 +6,8 @@ const MAX_RETRIES = 3;
 const INITIAL_DELAY_MS = 3000;
 const MAX_DELAY_MS = 30000;
 
+export type DocumentType = 'purchase-order' | 'invoice';
+
 export interface PurchaseOrderData {
   poNumber?: string;
   poDate?: string;
@@ -25,12 +27,38 @@ export interface POItem {
   // Allow any additional fields from the original table
   [key: string]: any;}
 
-export interface ProcessingResult {
-  success: boolean;
-  data?: PurchaseOrderData;
-  error?: string;
-  statusCode?: number;
+export interface InvoiceData {
+  fields: Record<string, any>;
+  lineItems: Record<string, any>[];
 }
+
+export interface InvoiceExcelData {
+  details: Record<string, any>[];
+  lineItems: Record<string, any>[];
+}
+
+type SuccessfulPurchaseOrderResult = {
+  success: true;
+  documentType: 'purchase-order';
+  data: PurchaseOrderData;
+};
+
+type SuccessfulInvoiceResult = {
+  success: true;
+  documentType: 'invoice';
+  data: InvoiceData;
+};
+
+type FailedProcessingResult = {
+  success: false;
+  error: string;
+  statusCode?: number;
+};
+
+export type ProcessingResult =
+  | SuccessfulPurchaseOrderResult
+  | SuccessfulInvoiceResult
+  | FailedProcessingResult;
 
 // Helper function to detect if a row looks like data instead of headers
 const detectDataRow = (row: string[]): boolean => {
@@ -280,6 +308,251 @@ const replaceImportHeaders = (tableData: string[][]): string[][] => {
   return [newHeaders, ...processedData.slice(1)];
 };
 
+const getFieldValue = (field: any): any => {
+  if (field === undefined || field === null) {
+    return null;
+  }
+
+  if (typeof field !== 'object') {
+    return field;
+  }
+
+  const kind = field.kind || field.valueType;
+
+  if (kind === 'currency') {
+    const currencyValue = field.value ?? field;
+
+    if (currencyValue !== undefined && currencyValue !== null) {
+      if (typeof currencyValue === 'number' || typeof currencyValue === 'string') {
+        const numeric = typeof currencyValue === 'string' ? Number(currencyValue.replace(/,/g, '')) : currencyValue;
+        return Number.isNaN(numeric) ? currencyValue : numeric;
+      }
+
+      if (typeof currencyValue === 'object') {
+        const possibleAmount = currencyValue.amount ?? currencyValue.value ?? currencyValue.decimalValue;
+        if (possibleAmount !== undefined && possibleAmount !== null) {
+          if (typeof possibleAmount === 'string') {
+            const parsed = Number(possibleAmount.replace(/,/g, ''));
+            return Number.isNaN(parsed) ? possibleAmount : parsed;
+          }
+          return possibleAmount;
+        }
+
+        if (currencyValue.currencyAmount !== undefined && currencyValue.currencyAmount !== null) {
+          if (typeof currencyValue.currencyAmount === 'string') {
+            const parsed = Number(currencyValue.currencyAmount.replace(/,/g, ''));
+            return Number.isNaN(parsed) ? currencyValue.currencyAmount : parsed;
+          }
+          return currencyValue.currencyAmount;
+        }
+      }
+    }
+
+    if (field.content !== undefined) {
+      return field.content;
+    }
+
+    return null;
+  }
+
+  if (kind === 'array' && Array.isArray(field.values)) {
+    return field.values.map((value: any) => getFieldValue(value));
+  }
+
+  if (kind === 'object' && field.properties) {
+    const obj: Record<string, any> = {};
+    Object.entries(field.properties).forEach(([key, value]) => {
+      obj[key] = getFieldValue(value);
+    });
+    return obj;
+  }
+
+  if (Array.isArray(field.value)) {
+    return field.value.map((value: any) => getFieldValue(value));
+  }
+
+  if (field.value !== undefined) {
+    return field.value;
+  }
+
+  if (field.content !== undefined) {
+    return field.content;
+  }
+
+  if (field.properties) {
+    const obj: Record<string, any> = {};
+    Object.entries(field.properties).forEach(([key, value]) => {
+      obj[key] = getFieldValue(value);
+    });
+    return obj;
+  }
+
+  return field;
+};
+
+const extractInvoiceLineItems = (itemsField: any): Record<string, any>[] => {
+  if (!itemsField) {
+    return [];
+  }
+
+  const values = Array.isArray(itemsField.values)
+    ? itemsField.values
+    : Array.isArray(itemsField.value)
+      ? itemsField.value
+      : [];
+
+  return values.map((itemField: any) => {
+    if (!itemField) {
+      return {};
+    }
+
+    const kind = itemField.kind || itemField.valueType;
+
+    if (kind === 'object' && itemField.properties) {
+      const result: Record<string, any> = {};
+      Object.entries(itemField.properties).forEach(([key, value]) => {
+        result[key] = getFieldValue(value);
+      });
+      return result;
+    }
+
+    if (itemField.value && typeof itemField.value === 'object') {
+      const result: Record<string, any> = {};
+      Object.entries(itemField.value).forEach(([key, value]) => {
+        result[key] = getFieldValue(value);
+      });
+      return result;
+    }
+
+    return getFieldValue(itemField);
+  });
+};
+
+const buildInvoiceDataFromFields = (fields: Record<string, any> = {}): InvoiceData => {
+  const headerData: Record<string, any> = {};
+  const lineItems: Record<string, any>[] = [];
+
+  Object.entries(fields).forEach(([fieldName, fieldValue]) => {
+    if (fieldName.toLowerCase() === 'items') {
+      lineItems.push(...extractInvoiceLineItems(fieldValue));
+    } else {
+      headerData[fieldName] = getFieldValue(fieldValue);
+    }
+  });
+
+  return {
+    fields: headerData,
+    lineItems,
+  };
+};
+
+export const aggregateInvoiceData = (
+  invoices: InvoiceData[],
+  sourcePages: string[],
+  options: { includeSourcePage?: boolean } = {}
+): InvoiceExcelData => {
+  const details: Record<string, any>[] = [];
+  const lineItems: Record<string, any>[] = [];
+  const includeSourcePage = options.includeSourcePage ?? false;
+
+  invoices.forEach((invoice, index) => {
+    const pageLabel = sourcePages[index] ?? `Page ${index + 1}`;
+
+    const detailRow: Record<string, any> = { ...invoice.fields };
+    if (includeSourcePage) {
+      const detailKey = detailRow.hasOwnProperty('__source_page')
+        ? `__source_page_${index + 1}`
+        : '__source_page';
+      detailRow[detailKey] = pageLabel;
+    }
+    details.push(detailRow);
+
+    invoice.lineItems.forEach((lineItem) => {
+      const lineItemRow: Record<string, any> = { ...lineItem };
+      if (includeSourcePage) {
+        const lineKey = lineItemRow.hasOwnProperty('__source_page')
+          ? `__source_page_${index + 1}`
+          : '__source_page';
+        lineItemRow[lineKey] = pageLabel;
+      }
+      lineItems.push(lineItemRow);
+    });
+  });
+
+  return {
+    details,
+    lineItems,
+  };
+};
+
+const sanitizeRecordForExcel = (record: Record<string, any>): Record<string, any> => {
+  const sanitized: Record<string, any> = {};
+
+  Object.entries(record).forEach(([key, value]) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      sanitized[key] = trimmed === '' ? null : value;
+    } else if (value === null) {
+      sanitized[key] = null;
+    } else if (value === undefined) {
+      sanitized[key] = undefined;
+    } else {
+      sanitized[key] = value;
+    }
+  });
+
+  return sanitized;
+};
+
+const parseRetryAfterFromMessage = (message?: string): number | undefined => {
+  if (!message) {
+    return undefined;
+  }
+
+  const match = message.match(/retry after\s+(\d+)\s*seconds?/i);
+  if (match && match[1]) {
+    const seconds = parseInt(match[1], 10);
+    if (!isNaN(seconds)) {
+      return seconds * 1000;
+    }
+  }
+
+  return undefined;
+};
+
+const computeRetryDelay = (error: any, attempt: number): { delay: number; reason: 'exponential backoff' | 'Azure-suggested delay'; } => {
+  let delay = INITIAL_DELAY_MS * Math.pow(2, attempt);
+  let reason: 'exponential backoff' | 'Azure-suggested delay' = 'exponential backoff';
+
+  if (error) {
+    if (typeof error.retryAfterInMs === 'number' && !isNaN(error.retryAfterInMs)) {
+      delay = error.retryAfterInMs;
+      reason = 'Azure-suggested delay';
+    } else {
+      const retryAfterHeader = error.response?.headers?.get?.('retry-after')
+        ?? error.response?.headers?.['retry-after'];
+
+      if (retryAfterHeader !== undefined) {
+        const numericHeader = Number(retryAfterHeader);
+        if (!isNaN(numericHeader)) {
+          // Retry-After is typically provided in seconds. If the value looks like seconds, convert to ms.
+          delay = numericHeader > 1000 ? numericHeader : numericHeader * 1000;
+          reason = 'Azure-suggested delay';
+        }
+      } else {
+        const parsedFromMessage = parseRetryAfterFromMessage(error.message);
+        if (parsedFromMessage !== undefined) {
+          delay = parsedFromMessage;
+          reason = 'Azure-suggested delay';
+        }
+      }
+    }
+  }
+
+  delay = Math.min(delay, MAX_DELAY_MS);
+  return { delay, reason };
+};
+
 // Enhanced analyze document function
 export const analyzeDocument = async (
   file: File,
@@ -290,29 +563,42 @@ export const analyzeDocument = async (
   const client = new DocumentAnalysisClient(endpoint, new AzureKeyCredential(key));
 
   const fileBuffer = await file.arrayBuffer();
-  const modelId = 'prebuilt-document';
+  const normalizedType: DocumentType = documentType === 'invoice' ? 'invoice' : 'purchase-order';
+  const modelId = normalizedType === 'invoice' ? 'prebuilt-invoice' : 'prebuilt-document';
 
-  console.log(`Processing document: ${file.name}`);
+  console.log(`Processing document: ${file.name} using model ${modelId}`);
 
-  // Retry mechanism
-  const maxRetries = MAX_RETRIES;
-  const initialDelay = INITIAL_DELAY_MS;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const poller = await client.beginAnalyzeDocument(modelId, fileBuffer);
       const result = await poller.pollUntilDone();
 
+      if (normalizedType === 'invoice') {
+        const invoiceDocument = result?.documents?.[0];
+        const fields = invoiceDocument?.fields;
+
+        if (!fields) {
+          return { success: false, error: 'No invoice data found in document.' };
+        }
+
+        const invoiceData = buildInvoiceDataFromFields(fields);
+        return {
+          success: true,
+          documentType: 'invoice',
+          data: invoiceData,
+        };
+      }
+
       if (result && result.tables?.length) {
         console.log(`Found ${result.tables.length} tables in document`);
-        
+
         const allItems: POItem[] = [];
-        
+
         result.tables.forEach((table, tableIndex) => {
           console.log(`Processing table ${tableIndex}:`);
           const rawTableData = extractTableData(table);
           if (rawTableData.length === 0) return;
-          
+
           const processedData = replaceImportHeaders(rawTableData);
           if (processedData.length < 2) return;
 
@@ -332,48 +618,41 @@ export const analyzeDocument = async (
           });
           allItems.push(...tableItems);
         });
-        
+
         const poData: PurchaseOrderData = {
           items: allItems,
           poNumber: file.name.replace('.pdf', ''),
           poDate: '',
           vendor: '',
-          total: allItems.reduce((sum, item) => sum + (item.total || 0), 0)
+          total: allItems.reduce((sum, item) => sum + (item.total || 0), 0),
         };
 
         console.log(`Total items processed: ${allItems.length}`);
-        return { success: true, data: poData };
+        return {
+          success: true,
+          documentType: 'purchase-order',
+          data: poData,
+        };
       }
-      
+
       return { success: false, error: 'No table data found in document' };
-
     } catch (error: any) {
-      console.error(`Attempt ${attempt + 1} for ${file.name} failed. Error: ${error.message}`);
-
-      if (attempt < maxRetries) {
-        let currentDelay = initialDelay * Math.pow(2, attempt);
-
-        if (error.statusCode === 429) {
-          const retryAfterHeader = error.response?.headers?.get('retry-after');
-          if (retryAfterHeader) {
-            const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-            if (!isNaN(retryAfterSeconds)) {
-              currentDelay = retryAfterSeconds * 1000;
-            }
-          }
-        }
-
-        currentDelay = Math.min(currentDelay, MAX_DELAY_MS);
-        console.warn(`Retrying in ${currentDelay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, currentDelay));
+      if (attempt < MAX_RETRIES) {
+        const { delay, reason } = computeRetryDelay(error, attempt);
+        console.warn(
+          `Attempt ${attempt + 1} of ${MAX_RETRIES + 1} failed for document "${file.name}". Error: ${error.message}. Retrying in ${delay}ms (using ${reason}).`
+        );
+        await new Promise(resolve => setTimeout(resolve, delay));
       } else {
-        console.error(`All retries failed for ${file.name}.`);
-        // On final failure, return the error details directly
+        console.error(
+          `All ${MAX_RETRIES + 1} attempts to process document "${file.name}" failed. Last error:`,
+          error
+        );
         return { success: false, error: error.message, statusCode: error.statusCode };
       }
     }
   }
-  // This part should be unreachable if the loop logic is correct, but it satisfies TypeScript
+
   return { success: false, error: 'Exited analysis loop unexpectedly.' };
 };
 // Function to split PDF into pages
@@ -406,69 +685,85 @@ export const splitPdf = async (file: File): Promise<File[]> => {
 };
 // Function to generate Excel output - PRESERVES ALL DATA
 export const generateExcelOutput = async (
-  data: PurchaseOrderData,
-  documentType: string,
+  data: PurchaseOrderData | InvoiceExcelData,
+  documentType: DocumentType,
   fileName: string
 ): Promise<{ url: string; fileName: string }> => {
-  console.log(`Generating Excel for ${data.items.length} items`);
-  
-  // Sanitize items data for Excel generation - PRESERVE ALL COLUMNS
-  const sanitizedItems = data.items.map((item, index) => {
-    const sanitizedItem: Record<string, any> = {}; // Use Record to allow any keys
-    
-    // Iterate over ALL keys in the actual item, not just POItem keys
-    Object.keys(item).forEach(key => {
-      const value = item[key as keyof typeof item];
-      
-      if (typeof value === 'string' && value.trim() === '') {
-        // If string is empty or only whitespace, set to null for Excel
-        sanitizedItem[key] = null;
-      } else if (value === undefined || value === null) {
-        // Handle undefined/null values
-        sanitizedItem[key] = null;
-      } else {
-        // Otherwise, keep the original value
-        sanitizedItem[key] = value;
-      }
-    });
-    
-    // Log the first few items to help debug
-    if (index < 3) {
-      console.log(`Item ${index} columns:`, Object.keys(sanitizedItem));
-      console.log(`Item ${index} sample data:`, sanitizedItem);
-    }
-    
-    return sanitizedItem;
-  });
-  
-  // Log total unique columns across all items
-  const allColumns = new Set<string>();
-  sanitizedItems.forEach(item => {
-    Object.keys(item).forEach(key => allColumns.add(key));
-  });
-  console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns).sort());
-  
-  // Check for our standard columns
-  const standardColumns = ['pu_quant', 'pu_price', 'pr_codenum', 'total'];
-  const foundStandardColumns = standardColumns.filter(col => allColumns.has(col));
-  console.log(`Found standard columns: ${foundStandardColumns.join(', ')}`);
-  
   const wb = XLSX.utils.book_new();
-  
-  // Use sanitizedItems for generating the worksheet
-  const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
-  
-  const excelFileName = fileName.replace('.pdf', '.xlsx');
-  
-  XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
-  
+  const normalizedFileName = fileName.replace(/\.pdf$/i, '.xlsx');
+
+  if (documentType === 'invoice') {
+    const invoiceData = data as InvoiceExcelData;
+    console.log(
+      `Generating Excel for invoice with ${invoiceData.details.length} detail row(s) and ${invoiceData.lineItems.length} line item(s)`
+    );
+
+    const sanitizedDetails = invoiceData.details.map((detail, index) => {
+      const sanitized = sanitizeRecordForExcel(detail);
+      if (index < 3) {
+        console.log(`Invoice detail row ${index}:`, sanitized);
+      }
+      return sanitized;
+    });
+
+    const sanitizedLineItems = invoiceData.lineItems.map((item, index) => {
+      const sanitized = sanitizeRecordForExcel(item);
+      if (index < 3) {
+        console.log(`Invoice line item ${index}:`, sanitized);
+      }
+      return sanitized;
+    });
+
+    const detailColumns = new Set<string>();
+    sanitizedDetails.forEach(row => Object.keys(row).forEach(key => detailColumns.add(key)));
+    const lineItemColumns = new Set<string>();
+    sanitizedLineItems.forEach(row => Object.keys(row).forEach(key => lineItemColumns.add(key)));
+
+    console.log(
+      `Invoice detail columns (${detailColumns.size}): ${Array.from(detailColumns).sort().join(', ')}`
+    );
+    console.log(
+      `Invoice line item columns (${lineItemColumns.size}): ${Array.from(lineItemColumns).sort().join(', ')}`
+    );
+
+    const detailsSheet = XLSX.utils.json_to_sheet(sanitizedDetails.length ? sanitizedDetails : [{}]);
+    const lineItemsSheet = XLSX.utils.json_to_sheet(sanitizedLineItems.length ? sanitizedLineItems : [{}]);
+
+    XLSX.utils.book_append_sheet(wb, detailsSheet, 'Invoice Details');
+    XLSX.utils.book_append_sheet(wb, lineItemsSheet, 'Line Items');
+  } else {
+    const poData = data as PurchaseOrderData;
+    console.log(`Generating Excel for ${poData.items.length} purchase order item(s)`);
+
+    const sanitizedItems = poData.items.map((item, index) => {
+      const sanitizedItem = sanitizeRecordForExcel(item as Record<string, any>);
+      if (index < 3) {
+        console.log(`Item ${index} columns:`, Object.keys(sanitizedItem));
+        console.log(`Item ${index} sample data:`, sanitizedItem);
+      }
+      return sanitizedItem;
+    });
+
+    const allColumns = new Set<string>();
+    sanitizedItems.forEach(item => {
+      Object.keys(item).forEach(key => allColumns.add(key));
+    });
+    console.log(`Total unique columns: ${allColumns.size}`, Array.from(allColumns).sort());
+
+    const standardColumns = ['pu_quant', 'pu_price', 'pr_codenum', 'total'];
+    const foundStandardColumns = standardColumns.filter(col => allColumns.has(col));
+    console.log(`Found standard columns: ${foundStandardColumns.join(', ')}`);
+
+    const itemsWs = XLSX.utils.json_to_sheet(sanitizedItems);
+    XLSX.utils.book_append_sheet(wb, itemsWs, 'Line Items');
+  }
+
   const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const blob = new Blob([excelBuffer], { 
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+  const blob = new Blob([excelBuffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
-  
+
   const url = URL.createObjectURL(blob);
-  
-  console.log(`Excel file created: ${excelFileName} with columns: ${Array.from(allColumns).sort().join(', ')}`);
-  return { url, fileName: excelFileName };
+  console.log(`Excel file created: ${normalizedFileName}`);
+  return { url, fileName: normalizedFileName };
 };
