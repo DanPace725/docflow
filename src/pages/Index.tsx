@@ -11,10 +11,13 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 
 
-import { 
+import {
   analyzeDocument,
   splitPdf,
   generateExcelOutput,
+  aggregateInvoiceData,
+  DocumentType,
+  InvoiceData,
   //pullPrices as pullPricesService,
   //batchClean as batchCleanService
 } from '@/services/document-processor';
@@ -41,54 +44,76 @@ const Index: React.FC = () => {
     setStatus('processing');
     setStatusMessage('Preparing files for processing...');
     setProgress(10);
+    setDownloadUrls([]);
 
+    const normalizedDocumentType = documentType as DocumentType;
     let overallErrorMessage = "";
-    const failedPages: File[] = [];
+    const failedPages: Array<{ page: File; parentFileName: string }> = [];
+    const invoiceAggregation =
+      normalizedDocumentType === 'invoice' && multiPage
+        ? new Map<string, { pages: InvoiceData[]; pageNames: string[] }>()
+        : null;
 
     try {
       let totalPages = 0;
       let processedPages = 0;
 
-      // First, get a total count of all pages to be processed
       for (const file of files) {
         const pages = await splitPdf(file);
         totalPages += pages.length;
       }
 
-      // Main processing loop
-      let interRequestDelay = 1000; // Start with a 1s delay
+      let interRequestDelay = 1000;
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         setStatusMessage(`Processing file ${i + 1} of ${files.length}: ${file.name}`);
-        
+
         const pages = await splitPdf(file);
 
         for (const page of pages) {
           processedPages++;
           setProgress(Math.round((processedPages / totalPages) * 80) + 10);
 
-          // Don't wait before the very first request
           if (processedPages > 1) {
             setStatusMessage(`Waiting ${interRequestDelay}ms...`);
             await new Promise(resolve => setTimeout(resolve, interRequestDelay));
           }
 
           setStatusMessage(`Analyzing page ${page.name} (${processedPages}/${totalPages})`);
-          
-          const result = await analyzeDocument(page, documentType);
-          
-          if (result.success && result.data) {
-            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
-            setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = excelFileName;
-            link.click();
+
+          const result = await analyzeDocument(page, normalizedDocumentType);
+
+          if (result.success) {
+            if (result.documentType === 'invoice') {
+              const invoiceData = result.data;
+              if (invoiceAggregation) {
+                const existing = invoiceAggregation.get(file.name) ?? { pages: [], pageNames: [] };
+                existing.pages.push(invoiceData);
+                existing.pageNames.push(page.name);
+                invoiceAggregation.set(file.name, existing);
+              } else {
+                const excelData = aggregateInvoiceData([invoiceData], [page.name], { includeSourcePage: false });
+                const { url, fileName: excelFileName } = await generateExcelOutput(excelData, 'invoice', page.name);
+                setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = excelFileName;
+                link.click();
+              }
+            } else {
+              const poData = result.data;
+              const { url, fileName: excelFileName } = await generateExcelOutput(poData, 'purchase-order', page.name);
+              setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = excelFileName;
+              link.click();
+            }
           } else {
             const errorMessage = `Initial processing failed for page: ${page.name}. Error: ${result.error || 'Unknown'}`;
             toast.error(errorMessage);
             overallErrorMessage += `${errorMessage}\n`;
-            failedPages.push(page); // Add to retry queue
+            failedPages.push({ page, parentFileName: file.name });
 
             if (result.statusCode === 429) {
               interRequestDelay = Math.min(interRequestDelay * 2, 30000);
@@ -98,29 +123,47 @@ const Index: React.FC = () => {
         }
       }
 
-      // Retry loop for failed pages
       let finalErrorCount = 0;
       if (failedPages.length > 0) {
         setStatusMessage(`Retrying ${failedPages.length} failed page(s)...`);
         setProgress(90);
 
-        const retryDelay = 5000; // Use a generous static delay for retries
+        const retryDelay = 5000;
 
-        for (const page of failedPages) {
+        for (const { page, parentFileName } of failedPages) {
           setStatusMessage(`Waiting ${retryDelay}ms before retrying ${page.name}...`);
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
           setStatusMessage(`Retrying page: ${page.name}`);
-          const result = await analyzeDocument(page, documentType);
+          const result = await analyzeDocument(page, normalizedDocumentType);
 
-          if (result.success && result.data) {
+          if (result.success) {
             toast.success(`Successfully processed ${page.name} on retry.`);
-            const { url, fileName: excelFileName } = await generateExcelOutput(result.data, documentType, page.name);
-            setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = excelFileName;
-            link.click();
+            if (result.documentType === 'invoice') {
+              const invoiceData = result.data;
+              if (invoiceAggregation) {
+                const existing = invoiceAggregation.get(parentFileName) ?? { pages: [], pageNames: [] };
+                existing.pages.push(invoiceData);
+                existing.pageNames.push(page.name);
+                invoiceAggregation.set(parentFileName, existing);
+              } else {
+                const excelData = aggregateInvoiceData([invoiceData], [page.name], { includeSourcePage: false });
+                const { url, fileName: excelFileName } = await generateExcelOutput(excelData, 'invoice', page.name);
+                setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = excelFileName;
+                link.click();
+              }
+            } else {
+              const poData = result.data;
+              const { url, fileName: excelFileName } = await generateExcelOutput(poData, 'purchase-order', page.name);
+              setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = excelFileName;
+              link.click();
+            }
           } else {
             finalErrorCount++;
             const finalErrorMessage = `Permanent failure for page: ${page.name}. Error: ${result.error || 'Unknown'}`;
@@ -129,7 +172,24 @@ const Index: React.FC = () => {
           }
         }
       }
-      
+
+      if (invoiceAggregation) {
+        for (const [originalFileName, aggregate] of invoiceAggregation.entries()) {
+          if (aggregate.pages.length === 0) {
+            continue;
+          }
+
+          const excelSourceName = `${originalFileName.replace(/\.pdf$/i, '')}_aggregated.pdf`;
+          const excelData = aggregateInvoiceData(aggregate.pages, aggregate.pageNames, { includeSourcePage: true });
+          const { url, fileName: excelFileName } = await generateExcelOutput(excelData, 'invoice', excelSourceName);
+          setDownloadUrls(prevUrls => [...prevUrls, { url, fileName: excelFileName }]);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = excelFileName;
+          link.click();
+        }
+      }
+
       setProgress(100);
       if (finalErrorCount > 0) {
         setStatus('error');
@@ -146,7 +206,7 @@ const Index: React.FC = () => {
           description: `All pages from ${files.length} file(s) were processed successfully.`,
         });
       }
-      
+
     } catch (error) {
       setStatus('error');
       const unexpectedErrorMessage = `An unexpected error stopped the process: ${error instanceof Error ? error.message : 'Unknown error'}`;
